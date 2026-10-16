@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.core.errors import Conflict, NotFound
 from app.db.models import Board, BoardVersion, Tile, as_utc, new_id, utcnow
 from app.schemas import LayoutPlan, PlannedBoard
+from app.services import cache
 from app.services.events import hub
 
 log = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ async def publish(
     await session.commit()
     await session.refresh(root)
 
+    await cache.delete_prefix(f"boards:{root.user_id}:")
     log.info("layout published", extra={"ctx": {"board_id": root.id, "version": root.version}})
     await hub.publish(root.user_id, {"type": "board.published", "boardId": root.id, "version": root.version})
     return root

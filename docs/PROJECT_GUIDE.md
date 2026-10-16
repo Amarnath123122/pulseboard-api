@@ -419,3 +419,63 @@ This is `python scripts/demo.py` against the local API, with SQLite and mock AWS
 - **No API gateway or autoscale on B1**, to keep costs low. Next: move to S1/P0v3 and add API Management when there is traffic.
 - **The assistants are rules, not an AI model**, and the metrics are mocked. Section 7 explains how to swap in real ones.
 - **The frontend is not built yet.** It is planned as an Angular monorepo.
+
+## 12. Version 2: catalog CRUD, cache, navigation, Docker
+
+### Metric catalog in the database (nothing hardcoded)
+| Before | Now |
+|---|---|
+| Metrics hardcoded in `metrics.py` | `metrics` table (migration `0002`), seeded once from `app/db/seed_metrics.py`, then managed in the UI |
+| Setup questions listed fixed areas and regions | Areas come from the catalog; regions, units and page sizes come from settings (`PB_REGIONS`, `PB_UNITS`, `PB_PAGE_SIZES`) |
+| Area matching used a fixed word list | Matches catalog area names and metric-title words |
+| UI had fixed units, page sizes and API URLs | UI reads `/api/v1/meta` and loads runtime `/config.json` |
+
+### New API
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/meta` | regions, units, areas, page sizes, enums used for menus |
+| GET | `/api/v1/metrics?q&area&enabled&sort&desc&page&size` | search and paginate; `cached: true` when served by Redis |
+| GET / POST / PUT / DELETE | `/api/v1/metrics[/{key}]` | full CRUD; 409 on duplicate key, 422 on bad unit or format |
+| GET | `/api/v1/metrics/areas` | distinct areas |
+| GET | `/api/v1/boards?q&kind&page&size` | the user's boards with tile and alert counts |
+| GET | `/api/v1/jobs?job_type&status&page&size` | the user's setup and review history |
+
+### Redis cache
+| Key | TTL | Invalidated by |
+|---|---|---|
+| `catalog:v1` | 5 min | any metric create, update or delete |
+| `metrics:list:<query>` | 60 s | any metric write |
+| `tile:<id>:<hour>` | 5 min | metric write (results also roll over hourly) |
+| `boards:<user>:<query>` | 60 s | a publish for that user |
+
+- `PB_REDIS_URL` set: a real Redis (Docker `redis:7`, or Azure Managed Redis).
+- `PB_REDIS_URL` unset: an in-process fake Redis with the same API, so no server is needed.
+- Every cache error falls back to the database. `/readyz` reports `cache: up|down` without failing.
+
+### Frontend navigation
+The sidebar has **Overview · My boards · Metric catalog · Activity · Setup assistant**.
+- The active link is highlighted, and the sidebar collapses to a top bar on phones.
+- The footer shows WebSocket status, the signed-in user, and sign-out.
+- Toasts confirm saves and deletes, show errors, and announce `board.published` events.
+- Every list uses the shared pager, with page sizes taken from `/meta`.
+
+### Realtime
+- **SSE:** setup-assistant turns stream word by word.
+- **WebSocket `/ws/events`:** carries `board.building` and `board.published`. Board pages refetch, Activity refreshes, and a toast appears. It reconnects with backoff, and sends a ping every 25 s.
+- **Postgres `LISTEN/NOTIFY`:** relays events between API instances.
+
+### Docker
+`pulseboard-api/docker-compose.yml` runs the whole stack:
+
+| Service | Image | Port |
+|---|---|---|
+| postgres | postgres:16-alpine | 5432 |
+| redis | redis:7-alpine (LRU, 128 MB) | 6379 |
+| sqs (mock AWS) | motoserver/moto | 5000 |
+| api | `pulseboard-api/Dockerfile` (multi-stage, non-root, healthcheck, Alembic on start) | 8000 |
+| web | `pulseboard-web/Dockerfile` (Node build → unprivileged nginx, SPA fallback, `config.json` written from `API_URL`/`WS_URL`) | 8080 |
+
+```bash
+cd pulseboard-api && docker compose up --build
+# UI  http://localhost:8080   API docs http://localhost:8000/docs
+```

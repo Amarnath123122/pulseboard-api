@@ -85,3 +85,10 @@ Generated secrets are saved in `infra/secrets.local.json`, which is git-ignored,
 ## Configuration
 
 Every setting comes from a `PB_*` environment variable; see `app/core/config.py` and `.env.example`. In production the app refuses to start if it would use the default JWT secret or service key.
+
+## Version 2
+- **Metric catalog:** stored in the database, with full CRUD, search, sort and pagination at `/api/v1/metrics`.
+- **Browsing:** `/api/v1/meta`, `/api/v1/boards` and `/api/v1/jobs`.
+- **Redis cache:** set `PB_REDIS_URL` to use a real Redis. Without it, an in-process fake Redis is used.
+- **Docker:** run the whole stack with `docker compose up --build`. The UI is at http://localhost:8080 and the API at http://localhost:8000.
+- **Details:** see `docs/PROJECT_GUIDE.md` section 12.

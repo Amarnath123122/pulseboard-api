@@ -4,28 +4,35 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.security import Principal, current_principal
 from app.db.session import get_session
 from app.services import catalog
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"], dependencies=[Depends(current_principal)])
 
-Unit = Literal["USD", "%", "x", "pts", "days", "tickets"]
 
 
 class MetricBase(BaseModel):
     area: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
     title: str = Field(min_length=1, max_length=256)
-    unit: Unit
+    unit: str = Field(min_length=1, max_length=32)
     base: float = Field(gt=0, description="Typical level the mock source generates around")
     volatility: float = Field(gt=0, le=1)
     higher_is_better: bool = True
     owners: list[str] = Field(default_factory=list, max_length=20)
     sources: list[str] = Field(default_factory=list, max_length=20)
     enabled: bool = True
+
+    @field_validator("unit")
+    @classmethod
+    def _known_unit(cls, v: str) -> str:
+        if v not in get_settings().units:
+            raise ValueError(f"unit must be one of {get_settings().units}")
+        return v
 
 
 class MetricIn(MetricBase):

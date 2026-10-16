@@ -188,3 +188,17 @@ async def test_disabled_metric_leaves_boards(client):
     data = (await client.get(f"/api/v1/tiles/{tiles[0]['id']}/data", headers=h)).json()
     again = (await client.get(f"/api/v1/tiles/{tiles[0]['id']}/data", headers=h)).json()
     assert not data["cached"] and again["cached"] and again["result"] == data["result"]
+
+
+async def test_meta_boards_and_jobs_lists(client):
+    h = await sign_in(client, "U10")
+    meta = (await client.get("/api/v1/meta", headers=h)).json()
+    assert "EMEA" in meta["regions"] and "USD" in meta["units"] and meta["areas"]
+    await run_setup(client, h, None)
+    boards = (await client.get("/api/v1/boards", params={"size": 2}, headers=h)).json()
+    assert boards["items"][0]["kind_cd"] == "OVERVIEW" and boards["items"][0]["tile_count"] > 0
+    assert boards["pages"] == -(-boards["total"] // 2)
+    jobs = (await client.get("/api/v1/jobs", params={"job_type": "SETUP"}, headers=h)).json()
+    assert jobs["total"] == 1 and jobs["items"][0]["status_cd"] == "SUCCEEDED"
+    other = (await client.get("/api/v1/boards", headers=await sign_in(client, "U11"))).json()
+    assert other["total"] == 0

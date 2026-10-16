@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     max_delivery_attempts: int = 5
 
     regions: list[str] = ["NA", "EMEA", "APAC", "LATAM"]
+    units: list[str] = ["USD", "%", "x", "pts", "days", "tickets"]
+    count_units: list[str] = ["tickets"]  # shown as whole numbers
+    volume_units: list[str] = ["USD", "tickets"]  # split across regions; other units are rates
+    page_sizes: list[int] = [5, 10, 25, 50]
     redis_url: str | None = None  # e.g. rediss://:<key>@<host>:10000/0 ; unset = in-process fake Redis
     cache_ttl_seconds: int = 300
 

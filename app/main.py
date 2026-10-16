@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from app.api import health, internal, metrics_admin, public, realtime
+from app.api import browse, health, internal, metrics_admin, public, realtime
 from app.assistants import setup
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
@@ -108,6 +108,7 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(health.router)
     app.include_router(public.router)
+    app.include_router(browse.router)
     app.include_router(metrics_admin.router)
     app.include_router(internal.router)
     app.include_router(realtime.router)

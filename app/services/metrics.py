@@ -16,8 +16,6 @@ from app.core.config import get_settings
 Catalog = dict[str, dict[str, Any]]
 
 OPERATIONS = ("stat", "series", "by_region", "projection")
-VOLUME_UNITS = {"USD", "tickets"}
-COUNT_UNITS = {"tickets"}
 
 
 class MetricsError(Exception):
@@ -44,7 +42,7 @@ def _values(meta: dict[str, Any], metric: str, region: str, points: int, bucket:
     rng = _rng(metric, region, bucket)
     if region == "ALL":
         level = meta["base"]
-    elif meta["unit"] in VOLUME_UNITS:  # a region holds a share of a volume...
+    elif meta["unit"] in get_settings().volume_units:  # a region holds a share of a volume...
         level = meta["base"] * rng.uniform(0.2, 0.35)
     else:  # ...but a rate or score only differs a little between regions
         level = meta["base"] * rng.uniform(0.97, 1.03)
@@ -63,7 +61,7 @@ def _values(meta: dict[str, Any], metric: str, region: str, points: int, bucket:
 
 def _tidy(meta: dict[str, Any], value: float) -> float:
     """Counts are whole numbers; everything else keeps three decimals."""
-    return float(int(round(value))) if meta["unit"] in COUNT_UNITS else round(value, 3)
+    return float(int(round(value))) if meta["unit"] in get_settings().count_units else round(value, 3)
 
 
 def run_query(catalog: Catalog, spec: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
