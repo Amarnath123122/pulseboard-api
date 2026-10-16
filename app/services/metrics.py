@@ -53,6 +53,8 @@ CATALOG: dict[str, dict[str, Any]] = {
 
 AREAS = sorted({m["area"] for m in CATALOG.values()})
 OPERATIONS = ("stat", "series", "by_region", "projection")
+VOLUME_UNITS = {"USD", "tickets"}
+COUNT_UNITS = {"tickets"}
 
 
 class MetricsError(Exception):
@@ -78,7 +80,14 @@ def describe_metric(metric: str) -> dict[str, Any]:
 def _values(metric: str, region: str, points: int, bucket: str) -> list[float]:
     meta = CATALOG[metric]
     rng = _rng(metric, region, bucket)
-    level = meta["base"] * (1 if region == "ALL" else rng.uniform(0.2, 0.35))
+    if region == "ALL":
+        level = meta["base"]
+    elif meta["unit"] in VOLUME_UNITS:  # a region holds a share of a volume...
+        level = meta["base"] * rng.uniform(0.2, 0.35)
+    else:  # ...but a rate or score only differs a little between regions
+        level = meta["base"] * rng.uniform(0.97, 1.03)
+    if meta["unit"] == "%" and meta["higher_is_better"]:
+        level = min(level, 100.0)
     vol = meta["volatility"]
     values = []
     for _ in range(points):
@@ -87,7 +96,12 @@ def _values(metric: str, region: str, points: int, bucket: str) -> list[float]:
     if rng.random() < 0.45:  # occasional shock in the latest point so reviews have something to flag
         worse = -1 if meta["higher_is_better"] else 1
         values[-1] = max(0.0, values[-1] * (1 + worse * rng.uniform(4, 15) * vol))
-    return [round(v, 3) for v in values]
+    return [_tidy(metric, v) for v in values]
+
+
+def _tidy(metric: str, value: float) -> float:
+    """Counts are whole numbers; everything else keeps three decimals."""
+    return float(int(round(value))) if CATALOG[metric]["unit"] in COUNT_UNITS else round(value, 3)
 
 
 def run_query(spec: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
@@ -133,7 +147,7 @@ def project(metric: str, values: list[float], labels: list[str], horizon: int = 
     last = datetime.strptime(labels[-1], "%Y-%m-%d")
     actual = [{"label": lab, "value": v, "projected": False} for lab, v in zip(labels, values, strict=True)]
     ahead = [{"label": (last + timedelta(weeks=i + 1)).strftime("%Y-%m-%d"),
-              "value": round(max(0.0, intercept + slope * (n + i)), 3), "projected": True} for i in range(horizon)]
+              "value": _tidy(metric, max(0.0, intercept + slope * (n + i))), "projected": True} for i in range(horizon)]
     return {"shape": "series", "unit": CATALOG[metric]["unit"], "rows": actual + ahead}
 
 

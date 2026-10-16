@@ -132,6 +132,16 @@ async def test_review_is_enqueued_on_sqs(client):
         review_queue.cache_clear()
 
 
+def test_regional_rates_stay_realistic():
+    from app.services import metrics
+
+    for region in metrics.REGIONS:
+        stat = metrics.run_query({"metric": "engineering.availability", "op": "stat", "params": {"region": region}})
+        assert 90 <= stat["value"] <= 100, stat
+        rows = metrics.run_query({"metric": "finance.cloud_spend", "op": "by_region"})["rows"]
+        assert sum(r["value"] for r in rows) > 0
+
+
 async def test_unknown_metric_reports_error_per_tile():
     from app.services import metrics
 
