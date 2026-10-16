@@ -11,25 +11,29 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from app.assistants.planner import DEFAULT_AREAS, build_plan, parse_areas, parse_region
+from app.assistants.planner import build_plan, default_areas, parse_areas, parse_region
 from app.core.config import get_settings
 from app.core.errors import Conflict, NotFound
 from app.db.models import AssistantJob, Conversation, ConversationMessage, utcnow
 from app.db.session import db
+from app.services import catalog as catalog_service
 from app.services import layout
 from app.services.preferences import as_dict, load_preferences, save_preference
 
 log = logging.getLogger(__name__)
 PROFILE_KEY = "SETUP_ASSISTANT"
 
-QUESTIONS: list[dict[str, str]] = [
-    {"key": "team", "scope": "LAYOUT",
-     "text": "Which team are you on? For example Sales, Customer Success, Operations, Engineering or Finance."},
-    {"key": "areas", "scope": "WATCHLIST",
-     "text": "Which areas should I watch for you? Pick any of sales, customers, operations, engineering, finance."},
-    {"key": "region", "scope": "LAYOUT",
-     "text": "Should I focus on one region (NA, EMEA, APAC, LATAM) or all of them?"},
-]
+QUESTION_KEYS = [("team", "LAYOUT"), ("areas", "WATCHLIST"), ("region", "LAYOUT")]
+
+
+def questions(areas: list[str]) -> list[dict[str, str]]:
+    """Question copy is built from live data: areas from the metric catalog, regions from settings."""
+    texts = {
+        "team": "Which team are you on?",
+        "areas": f"Which areas should I watch for you? Pick any of: {', '.join(areas)}.",
+        "region": f"Should I focus on one region ({', '.join(get_settings().regions)}) or all of them?",
+    }
+    return [{"key": k, "scope": s, "text": texts[k]} for k, s in QUESTION_KEYS]
 
 _background: set[asyncio.Task] = set()
 
@@ -57,18 +61,20 @@ async def converse(user_id: str, conversation_id: str | None, action: str, text:
             session.add(convo)
             await session.flush()
         yield sse("conversation", {"conversation_id": convo.id})
+        catalog = await catalog_service.load_catalog(session)
+        QUESTIONS = questions(default_areas(catalog))
 
         step = int(convo.state.get("step", 0))
-        if action == "reply" and text.strip() and step < len(QUESTIONS):
+        if action == "reply" and text.strip() and step < len(QUESTION_KEYS):
             q = QUESTIONS[step]
             session.add(ConversationMessage(conversation_id=convo.id, author_cd="user", content=text))
             await save_preference(session, user_id=user_id, origin="SETUP", scope=q["scope"], key=q["key"],
-                                  value=_interpret(q["key"], text))
+                                  value=_interpret(catalog, q["key"], text))
             step += 1
         elif action == "skip":
             session.add(ConversationMessage(conversation_id=convo.id, author_cd="user", content="(skipped)"))
 
-        if action != "skip" and step < len(QUESTIONS):
+        if action != "skip" and step < len(QUESTION_KEYS):
             reply = ("Hi! I'll set up your overview board. Three quick questions. " if step == 0 else "Thanks. ") \
                 + QUESTIONS[step]["text"]
             convo.state = {"step": step}
@@ -76,7 +82,7 @@ async def converse(user_id: str, conversation_id: str | None, action: str, text:
             await session.commit()
             async for chunk in _stream(reply):
                 yield chunk
-            yield sse("turn.end", {"step": step, "total_steps": len(QUESTIONS), "finished": False})
+            yield sse("turn.end", {"step": step, "total_steps": len(QUESTION_KEYS), "finished": False})
             return
 
         origin = "DEFAULT_TEMPLATE" if action == "skip" and step == 0 else "SETUP"
@@ -97,7 +103,7 @@ async def converse(user_id: str, conversation_id: str | None, action: str, text:
     async for chunk in _stream(reply):
         yield chunk
     yield sse("board", {"board_id": held.board_id, "build_status": "BUILDING"})
-    yield sse("turn.end", {"step": step, "total_steps": len(QUESTIONS), "finished": True})
+    yield sse("turn.end", {"step": step, "total_steps": len(QUESTION_KEYS), "finished": True})
 
     task = asyncio.create_task(_build(user_id, job_id, held))
     _background.add(task)
@@ -109,8 +115,9 @@ async def _build(user_id: str, job_id: str, held: layout.Claim) -> None:
         try:
             await asyncio.sleep(get_settings().setup_build_delay_seconds)
             prefs = as_dict(await load_preferences(session, user_id=user_id, scopes=["LAYOUT", "WATCHLIST"]))
-            plan = build_plan(team=prefs.get("team", {}).get("text", ""),
-                              areas=prefs.get("areas", {}).get("areas", DEFAULT_AREAS),
+            catalog = await catalog_service.load_catalog(session)
+            plan = build_plan(catalog, team=prefs.get("team", {}).get("text", ""),
+                              areas=prefs.get("areas", {}).get("areas") or default_areas(catalog),
                               region=prefs.get("region", {}).get("region", "ALL"))
             await layout.publish(session, board_id=held.board_id, claim_holder=held.claim_holder,
                                  generation=held.generation, plan=plan, job_id=job_id)
@@ -129,9 +136,9 @@ async def _finish(session, job_id: str, status: str, error: str | None = None) -
         await session.commit()
 
 
-def _interpret(key: str, text: str) -> dict[str, Any]:
+def _interpret(catalog: dict, key: str, text: str) -> dict[str, Any]:
     if key == "areas":
-        return {"text": text, "areas": parse_areas(text)}
+        return {"text": text, "areas": parse_areas(catalog, text)}
     if key == "region":
         return {"text": text, "region": parse_region(text)}
     return {"text": text.strip()[:200]}

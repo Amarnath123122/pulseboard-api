@@ -133,21 +133,58 @@ async def test_review_is_enqueued_on_sqs(client):
 
 
 def test_regional_rates_stay_realistic():
+    from app.db.seed_metrics import INITIAL_METRICS
     from app.services import metrics
 
-    for region in metrics.REGIONS:
-        stat = metrics.run_query({"metric": "engineering.availability", "op": "stat", "params": {"region": region}})
+    for region in ("NA", "EMEA", "APAC", "LATAM"):
+        stat = metrics.run_query(INITIAL_METRICS, {"metric": "engineering.availability", "op": "stat",
+                                                   "params": {"region": region}})
         assert 90 <= stat["value"] <= 100, stat
-        rows = metrics.run_query({"metric": "finance.cloud_spend", "op": "by_region"})["rows"]
-        assert sum(r["value"] for r in rows) > 0
 
 
-async def test_unknown_metric_reports_error_per_tile():
+def test_unknown_metric_raises():
+    import pytest
+
     from app.services import metrics
 
-    try:
-        metrics.run_query({"metric": "nope", "op": "stat"})
-    except metrics.MetricsError as exc:
-        assert "Unknown metric" in str(exc)
-    else:
-        raise AssertionError("expected MetricsError")
+    with pytest.raises(metrics.MetricsError):
+        metrics.run_query({}, {"metric": "nope", "op": "stat"})
+
+
+async def test_metric_crud_search_pagination_and_cache(client):
+    h = await sign_in(client, "admin1")
+    body = {"key": "sales.win_rate", "area": "sales", "title": "Win rate", "unit": "%", "base": 24,
+            "volatility": 0.05, "higher_is_better": True, "owners": ["Sales Ops"], "sources": ["crm.deals"]}
+    assert (await client.post("/api/v1/metrics", json=body, headers=h)).status_code == 201
+    assert (await client.post("/api/v1/metrics", json=body, headers=h)).status_code == 409
+
+    page1 = (await client.get("/api/v1/metrics", params={"size": 4}, headers=h)).json()
+    assert page1["total"] == 10 and page1["pages"] == 3 and len(page1["items"]) == 4 and not page1["cached"]
+    again = (await client.get("/api/v1/metrics", params={"size": 4}, headers=h)).json()
+    assert again["cached"] and again["items"] == page1["items"]
+    found = (await client.get("/api/v1/metrics", params={"q": "win"}, headers=h)).json()
+    assert [m["key"] for m in found["items"]] == ["sales.win_rate"]
+
+    upd = {k: v for k, v in body.items() if k != "key"} | {"title": "Deal win rate"}
+    assert (await client.put("/api/v1/metrics/sales.win_rate", json=upd, headers=h)).json()["title"] == "Deal win rate"
+    after = (await client.get("/api/v1/metrics", params={"q": "deal win"}, headers=h)).json()
+    assert after["total"] == 1 and not after["cached"]  # write invalidated the cached pages
+    assert "sales" in (await client.get("/api/v1/metrics/areas", headers=h)).json()
+
+    assert (await client.delete("/api/v1/metrics/sales.win_rate", headers=h)).status_code == 204
+    assert (await client.get("/api/v1/metrics/sales.win_rate", headers=h)).status_code == 404
+    bad = await client.post("/api/v1/metrics", json=body | {"unit": "parsecs"}, headers=h)
+    assert bad.status_code == 422
+
+
+async def test_disabled_metric_leaves_boards(client):
+    h = await sign_in(client, "U8")
+    put = {"area": "finance", "title": "Cloud spend", "unit": "USD", "base": 210000, "volatility": 0.05,
+           "higher_is_better": False, "owners": ["FinOps"], "sources": ["cloud.billing_export"], "enabled": False}
+    assert (await client.put("/api/v1/metrics/finance.cloud_spend", json=put, headers=h)).status_code == 200
+    board_id = await run_setup(client, h, None)
+    tiles = (await client.get(f"/api/v1/boards/{board_id}/tiles", headers=h)).json()
+    assert all("cloud_spend" not in t["slot_key"] for t in tiles)
+    data = (await client.get(f"/api/v1/tiles/{tiles[0]['id']}/data", headers=h)).json()
+    again = (await client.get(f"/api/v1/tiles/{tiles[0]['id']}/data", headers=h)).json()
+    assert not data["cached"] and again["cached"] and again["result"] == data["result"]

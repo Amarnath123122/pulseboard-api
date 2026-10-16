@@ -13,3 +13,5 @@ pyjwt>=2.8
 azure-identity>=1.17
 azure-storage-queue>=12.10
 azure-monitor-opentelemetry>=1.6
+redis>=5.0
+fakeredis>=2.23

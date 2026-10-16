@@ -11,10 +11,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.assistants.planner import DEFAULT_AREAS, build_plan
+from app.assistants.planner import build_plan, default_areas
 from app.core.errors import Conflict, NotFound
 from app.db.models import AssistantJob, AssistantProfile, Board, Tile, utcnow
 from app.db.session import db
+from app.services import catalog as catalog_service
 from app.services import layout
 from app.services.preferences import as_dict, load_preferences
 
@@ -45,9 +46,11 @@ async def review_board(board_id: str, user_id: str, enqueued_at: datetime | None
         try:
             prefs = as_dict(await load_preferences(session, user_id=user_id, scopes=["LAYOUT", "WATCHLIST"]))
             current = await read_board(session, board_id)
+            catalog = await catalog_service.load_catalog(session)
             plan = build_plan(
+                catalog,
                 team=prefs.get("team", {}).get("text", ""),
-                areas=prefs.get("areas", {}).get("areas") or current.get("areas") or DEFAULT_AREAS,
+                areas=prefs.get("areas", {}).get("areas") or current.get("areas") or default_areas(catalog),
                 region=prefs.get("region", {}).get("region") or current.get("region", "ALL"),
             )
             await layout.publish(session, board_id=board_id, claim_holder=held.claim_holder,

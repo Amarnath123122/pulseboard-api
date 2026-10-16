@@ -52,6 +52,7 @@ class TileDataOut(BaseModel):
     presentation: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
+    cached: bool = False
 
 
 class FollowUpIn(BaseModel):

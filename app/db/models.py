@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -149,3 +149,20 @@ class ConversationMessage(Base):
     author_cd: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Metric(Timestamped, Base):
+    """Metric catalog, managed through /api/v1/metrics."""
+
+    __tablename__ = "metrics"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)  # e.g. "sales.bookings"
+    area: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(256), index=True)
+    unit: Mapped[str] = mapped_column(String(32))
+    base: Mapped[float] = mapped_column(Float)
+    volatility: Mapped[float] = mapped_column(Float)
+    higher_is_better: Mapped[bool] = mapped_column(Boolean, default=True)
+    owners: Mapped[list[Any]] = mapped_column(default=list)
+    sources: Mapped[list[Any]] = mapped_column(default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

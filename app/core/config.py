@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     review_interval_minutes: int = 60
     max_delivery_attempts: int = 5
 
+    regions: list[str] = ["NA", "EMEA", "APAC", "LATAM"]
+    redis_url: str | None = None  # e.g. rediss://:<key>@<host>:10000/0 ; unset = in-process fake Redis
+    cache_ttl_seconds: int = 300
+
     claim_seconds: int = 120
     setup_build_delay_seconds: float = 2.0  # simulated assistant think-time so the UI shows its building state
 

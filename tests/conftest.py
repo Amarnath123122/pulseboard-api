@@ -34,8 +34,12 @@ async def database() -> AsyncIterator[None]:
     async with db.engine.begin() as conn:  # type: ignore[union-attr]
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    from app.services import cache, catalog
+
+    await cache.reset()
     async with db.session() as s:
         await seed_reference_data(s)
+        await catalog.seed_if_empty(s)
     yield
     await db.dispose()
 

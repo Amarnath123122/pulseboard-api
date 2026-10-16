@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.services import cache
 
 router = APIRouter(tags=["health"])
 
@@ -19,4 +20,5 @@ async def readiness(session: AsyncSession = Depends(get_session)) -> JSONRespons
         await session.execute(text("SELECT 1"))
     except Exception:  # noqa: BLE001
         return JSONResponse({"status": "degraded", "database": "down"}, status_code=503)
-    return JSONResponse({"status": "ok", "database": "up"})
+    # Redis is a cache: if it is down the API still works, so report it without failing readiness.
+    return JSONResponse({"status": "ok", "database": "up", "cache": "up" if await cache.ping() else "down"})

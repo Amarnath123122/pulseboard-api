@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -15,7 +16,8 @@ from app.core.security import Principal, current_principal, issue_token
 from app.db.models import Board, Conversation, Tile
 from app.db.session import get_session
 from app.schemas import AssistantMessageIn, BoardOut, FollowUpIn, TileDataOut, TileOut, TokenIn, TokenOut
-from app.services import layout, metrics
+from app.services import cache, layout, metrics
+from app.services import catalog as catalog_service
 
 router = APIRouter(prefix="/api/v1")
 
@@ -83,8 +85,13 @@ async def tile_data(
     """Runs the tile's saved query. A source failure is reported in the body (status ERROR) so one broken
     source never blanks the whole board."""
     tile = await _owned_tile(session, tile_id, me)
+    key = f"tile:{tile.id}:{datetime.now(UTC):%Y%m%d%H}"
+    if (cached := await cache.get_json(key)) is not None:
+        return TileDataOut(tile_id=tile.id, status="OK", presentation=tile.presentation, result=cached, cached=True)
     try:
-        result = await asyncio.to_thread(metrics.run_query, tile.query_spec)
+        catalog = await catalog_service.load_catalog(session)
+        result = await asyncio.to_thread(metrics.run_query, catalog, tile.query_spec)
+        await cache.set_json(key, result)
         return TileDataOut(tile_id=tile.id, status="OK", presentation=tile.presentation, result=result)
     except metrics.MetricsError as exc:
         return TileDataOut(tile_id=tile.id, status="ERROR", presentation=tile.presentation, error=str(exc))

@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from app.api import health, internal, public, realtime
+from app.api import health, internal, metrics_admin, public, realtime
 from app.assistants import setup
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
@@ -18,6 +18,7 @@ from app.core.logging import configure_logging, request_id_ctx
 from app.db.models import Base
 from app.db.seed import seed_reference_data
 from app.db.session import db
+from app.services import catalog
 from app.services.events import hub
 from app.services.workers import review_scheduler, review_worker
 
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await conn.run_sync(Base.metadata.create_all)
     async with db.session() as session:
         await seed_reference_data(session)
+        await catalog.seed_if_empty(session)
 
     stop = asyncio.Event()
     tasks: list[asyncio.Task] = []
@@ -79,7 +81,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
@@ -106,6 +108,7 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(health.router)
     app.include_router(public.router)
+    app.include_router(metrics_admin.router)
     app.include_router(internal.router)
     app.include_router(realtime.router)
     return app

@@ -141,6 +141,28 @@ resource reviewQueue 'Microsoft.Storage/storageAccounts/queueServices/queues@202
   name: queueName
 }
 
+// ---------- Cache ----------
+// Azure Managed Redis, smallest tier. TLS on 10000; the proxy-based cluster policy looks like a single node to clients.
+resource redis 'Microsoft.Cache/redisEnterprise@2025-04-01' = {
+  name: 'pb-redis-${suffix}'
+  location: location
+  tags: tags
+  sku: { name: 'Balanced_B0' }
+  properties: { minimumTlsVersion: '1.2' }
+}
+
+resource redisDb 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' = {
+  parent: redis
+  name: 'default'
+  properties: {
+    clientProtocol: 'Encrypted'
+    port: 10000
+    clusteringPolicy: 'EnterpriseCluster'
+    evictionPolicy: 'AllKeysLRU'
+    accessKeysAuthentication: 'Enabled'
+  }
+}
+
 // ---------- Secrets ----------
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: 'pb-kv-${suffix}'
@@ -159,6 +181,14 @@ resource dbUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: 'database-url'
   properties: {
     value: 'postgresql+asyncpg://${postgresAdminLogin}:${uriComponent(postgresAdminPassword)}@${postgres.properties.fullyQualifiedDomainName}:5432/${dbName}?ssl=require'
+  }
+}
+
+resource redisUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: vault
+  name: 'redis-url'
+  properties: {
+    value: 'rediss://:${uriComponent(redisDb.listKeys().primaryKey)}@${redis.properties.hostName}:10000/0'
   }
 }
 
@@ -222,6 +252,7 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'PB_DATABASE_URL', value: '@Microsoft.KeyVault(SecretUri=${dbUrlSecret.properties.secretUri})' }
         { name: 'PB_JWT_SECRET', value: '@Microsoft.KeyVault(SecretUri=${jwtSecretRef.properties.secretUri})' }
         { name: 'PB_SERVICE_KEY', value: '@Microsoft.KeyVault(SecretUri=${serviceKeyRef.properties.secretUri})' }
+        { name: 'PB_REDIS_URL', value: '@Microsoft.KeyVault(SecretUri=${redisUrlSecret.properties.secretUri})' }
         { name: 'PB_DB_AUTO_CREATE', value: 'false' }
         { name: 'PB_ENABLE_DEV_TOKEN', value: string(enableDemoSignIn) }
         { name: 'PB_QUEUE_BACKEND', value: 'azure' }
