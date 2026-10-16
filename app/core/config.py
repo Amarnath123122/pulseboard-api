@@ -49,7 +49,11 @@ class Settings(BaseSettings):
     count_units: list[str] = ["tickets"]  # shown as whole numbers
     volume_units: list[str] = ["USD", "tickets"]  # split across regions; other units are rates
     page_sizes: list[int] = [5, 10, 25, 50]
-    redis_url: str | None = None  # e.g. rediss://:<key>@<host>:10000/0 ; unset = in-process fake Redis
+    # redis  = shared Redis at redis_url (Docker, Azure Managed Redis) - correct with any number of workers/instances
+    # memory = in-process fake Redis - only for a single process (local `uvicorn`, tests)
+    # none   = no caching - safe default for multi-worker deployments without Redis
+    cache_backend: Literal["redis", "memory", "none"] = "memory"
+    redis_url: str | None = None  # e.g. rediss://:<key>@<host>:10000/0
     cache_ttl_seconds: int = 300
 
     claim_seconds: int = 120

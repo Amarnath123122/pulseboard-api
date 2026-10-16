@@ -1,21 +1,25 @@
 <#
 .SYNOPSIS
-  Deploys the Pulseboard API to Azure: resource group -> infrastructure (Bicep) -> code -> smoke test.
+  Deploys (or restarts) Pulseboard on Azure: infrastructure -> wake stopped services -> API -> web UI -> smoke test.
 
 .EXAMPLE
-  ./scripts/azure-deploy.ps1 -OwnerEmail you@example.com
-  ./scripts/azure-deploy.ps1 -OwnerEmail you@example.com -ResourceGroup rg-pulseboard -Location centralindia
+  ./scripts/azure-deploy.ps1 -OwnerEmail you@example.com                 # everything
+  ./scripts/azure-deploy.ps1 -OwnerEmail you@example.com -SkipInfra      # code only
+  ./scripts/azure-deploy.ps1 -OwnerEmail you@example.com -DeployRedis    # also Azure Managed Redis (extra cost)
 
-  Requires the Azure CLI and `az login`. Generated secrets are kept in infra/secrets.local.json
-  (git-ignored) so re-runs reuse them. Remove everything with: az group delete -n <ResourceGroup>
+  Requires the Azure CLI (az login), Node 18+, and pulseboard-web checked out next to this repo.
+  Secrets are generated once into infra/secrets.local.json (git-ignored). Pause billing: ./scripts/azure-stop.ps1
 #>
 param(
   [Parameter(Mandatory = $true)][string]$OwnerEmail,
   [string]$ResourceGroup = "rg-pulseboard",
   [string]$Location = "centralindia",
-  [switch]$SkipInfra
+  [string]$WebRepo = (Join-Path $PSScriptRoot "..\..\pulseboard-web"),
+  [switch]$SkipInfra,
+  [switch]$SkipWeb,
+  [switch]$DeployRedis
 )
-$ErrorActionPreference = "Continue"  # native az warnings go to stderr; failures are caught by Assert-Ok
+$ErrorActionPreference = "Continue"  # az writes warnings to stderr; real failures are caught by Assert-Ok
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 function New-Secret([int]$bytes = 32) {
@@ -42,6 +46,14 @@ if (-not $SkipInfra) {
   az group create --name $ResourceGroup --location $Location --tags app=pulseboard --output none
   Assert-Ok "az group create"
 
+  # A stopped Postgres server rejects deployments, so wake it first.
+  $pg = az postgres flexible-server list -g $ResourceGroup --query "[0].{name:name,state:state}" -o json 2>$null | ConvertFrom-Json
+  if ($pg -and $pg.state -eq "Stopped") {
+    Write-Host "==> Starting Postgres $($pg.name)"
+    az postgres flexible-server start -g $ResourceGroup -n $pg.name --output none
+    Assert-Ok "Postgres start"
+  }
+
   Write-Host "==> Infrastructure (first run ~10 min)"
   az deployment group create `
     --resource-group $ResourceGroup `
@@ -51,6 +63,7 @@ if (-not $SkipInfra) {
                  postgresAdminPassword=$($secrets.postgresAdminPassword) `
                  jwtSecret=$($secrets.jwtSecret) `
                  serviceKey=$($secrets.serviceKey) `
+                 deployRedis=$($DeployRedis.IsPresent.ToString().ToLower()) `
     --output none
   Assert-Ok "Infrastructure deployment"
 }
@@ -59,8 +72,9 @@ $out = az deployment group show --resource-group $ResourceGroup --name "pulseboa
   --query properties.outputs --output json | ConvertFrom-Json
 Assert-Ok "Reading deployment outputs"
 $app = $out.apiAppName.value
+az webapp start -g $ResourceGroup -n $app --output none
 
-Write-Host "==> Code -> $app"
+Write-Host "==> API code -> $app"
 $zip = Join-Path $env:TEMP "pulseboard-api.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Push-Location $root
@@ -69,22 +83,36 @@ try {
   tar -a -c -f $zip --exclude "__pycache__" app migrations alembic.ini requirements.txt startup.sh
   Assert-Ok "Packaging"
 } finally { Pop-Location }
-az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --timeout 900000 --track-status false --only-show-errors --output none
-Assert-Ok "Code deployment"
+# Startup (pip install + migrations) can outlast the CLI's own status polling, so readiness is checked below instead.
+az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --timeout 900000 `
+  --track-status false --only-show-errors --output none
+Assert-Ok "API deployment"
 
-Write-Host "==> Smoke test"
+Write-Host "==> Waiting for the API"
 $ready = $false
-for ($i = 0; $i -lt 30 -and -not $ready; $i++) {
-  try {
-    $r = Invoke-RestMethod "$($out.apiUrl.value)/readyz" -TimeoutSec 20
-    $ready = $r.status -eq "ok"
-  } catch { Start-Sleep -Seconds 10 }
+for ($i = 0; $i -lt 40 -and -not $ready; $i++) {
+  try { $ready = (Invoke-RestMethod "$($out.apiUrl.value)/readyz" -TimeoutSec 20).status -eq "ok" } catch { Start-Sleep 15 }
 }
 if (-not $ready) { throw "API did not become ready; check: az webapp log tail -g $ResourceGroup -n $app" }
 
+if (-not $SkipWeb) {
+  Write-Host "==> Web UI -> $($out.webAppName.value)"
+  $token = az staticwebapp secrets list -n $out.webAppName.value -g $ResourceGroup --query properties.apiKey -o tsv
+  Assert-Ok "Reading Static Web Apps token"
+  Push-Location $WebRepo
+  try {
+    npm ci --no-audit --no-fund; Assert-Ok "npm ci"
+    npm run build; Assert-Ok "Web build"
+    # Runtime config: the one build artifact is pointed at this environment's API.
+    @{ apiUrl = $out.apiUrl.value; wsUrl = $out.websocketUrl.value } | ConvertTo-Json |
+      Out-File -Encoding ascii "dist\pulseboard\browser\config.json"
+    npx --yes @azure/static-web-apps-cli@2.0.2 deploy ./dist/pulseboard/browser --deployment-token $token --env production
+    Assert-Ok "Web deployment"
+  } finally { Pop-Location }
+}
+
 Write-Host ""
 Write-Host "Deployed."
+Write-Host "  Web:        $($out.webUrl.value)"
 Write-Host "  API:        $($out.apiUrl.value)"
 Write-Host "  WebSocket:  $($out.websocketUrl.value)"
-Write-Host "  Key Vault:  $($out.keyVaultName.value)"
-Write-Host "  Telemetry:  Application Insights '$($out.appInsightsName.value)'"

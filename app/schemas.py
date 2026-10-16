@@ -1,7 +1,15 @@
-from datetime import datetime
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+
+# Every timestamp leaves the API as ISO-8601 UTC with an explicit offset, whatever the database returns
+# (SQLite gives naive values, Postgres aware ones), so clients can parse it as-is.
+UtcDateTime = Annotated[
+    datetime,
+    PlainSerializer(lambda d: (d.replace(tzinfo=UTC) if d.tzinfo is None else d.astimezone(UTC)).isoformat(),
+                    return_type=str, when_used="json"),
+]
 
 BoardKind = Literal["OVERVIEW", "DETAIL", "BRIEFING"]
 Visual = Literal["STAT", "TREND", "BREAKDOWN", "NOTE"]
@@ -27,8 +35,8 @@ class BoardOut(OrmModel):
     build_status_cd: str
     settings: dict[str, Any]
     version: int
-    next_review_at: datetime | None
-    updated_at: datetime
+    next_review_at: UtcDateTime | None
+    updated_at: UtcDateTime
 
 
 class TileOut(OrmModel):
@@ -103,7 +111,7 @@ class ClaimIn(BaseModel):
 class ClaimOut(BaseModel):
     board_id: str
     claim_holder: str
-    claim_expires_at: datetime
+    claim_expires_at: UtcDateTime
     generation: int
 
 
@@ -148,9 +156,9 @@ class JobOut(OrmModel):
     board_id: str | None
     status_cd: str
     error: str | None
-    enqueued_at: datetime | None
-    started_at: datetime
-    finished_at: datetime | None
+    enqueued_at: UtcDateTime | None
+    started_at: UtcDateTime
+    finished_at: UtcDateTime | None
 
 
 # ---------- assistant chat / auth ----------

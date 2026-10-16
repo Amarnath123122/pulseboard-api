@@ -56,6 +56,8 @@ def _values(meta: dict[str, Any], metric: str, region: str, points: int, bucket:
     if rng.random() < 0.45:  # occasional shock in the latest point so reviews have something to flag
         worse = -1 if meta["higher_is_better"] else 1
         values[-1] = max(0.0, values[-1] * (1 + worse * rng.uniform(4, 15) * vol))
+    if meta["unit"] == "%":  # a percentage can never leave 0-100
+        values = [min(v, 100.0) for v in values]
     return [_tidy(meta, v) for v in values]
 
 

@@ -1,6 +1,5 @@
 """Metric catalog CRUD with search, filters, sorting and pagination."""
 
-from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -10,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import Principal, current_principal
 from app.db.session import get_session
+from app.schemas import UtcDateTime
 from app.services import catalog
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"], dependencies=[Depends(current_principal)])
@@ -40,7 +40,7 @@ class MetricIn(MetricBase):
 
 
 class MetricOut(MetricIn):
-    updated_at: datetime | None = None
+    updated_at: UtcDateTime | None = None
 
 
 class MetricPage(BaseModel):

@@ -1,5 +1,4 @@
-"""Redis cache. PB_REDIS_URL points at a real Redis (Azure Managed Redis in the cloud); when it is unset the
-app uses an in-process fake Redis with the same API, so local runs and tests need no server.
+"""Cache, selected by PB_CACHE_BACKEND: a shared Redis, an in-process fake Redis (single process only), or none.
 Cache failures never fail a request: reads fall back to the database."""
 
 import json
@@ -17,9 +16,11 @@ _client: redis.Redis | None = None
 def client() -> redis.Redis:
     global _client
     if _client is None:
-        url = get_settings().redis_url
-        if url:
-            _client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2,
+        s = get_settings()
+        if s.cache_backend == "redis":
+            if not s.redis_url:
+                raise RuntimeError("PB_CACHE_BACKEND=redis needs PB_REDIS_URL")
+            _client = redis.from_url(s.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2,
                                      health_check_interval=30)
         else:
             import fakeredis
@@ -28,7 +29,13 @@ def client() -> redis.Redis:
     return _client
 
 
+def enabled() -> bool:
+    return get_settings().cache_backend != "none"
+
+
 async def get_json(key: str) -> Any | None:
+    if not enabled():
+        return None
     try:
         raw = await client().get(key)
         return json.loads(raw) if raw is not None else None
@@ -38,6 +45,8 @@ async def get_json(key: str) -> Any | None:
 
 
 async def set_json(key: str, value: Any, ttl: int | None = None) -> None:
+    if not enabled():
+        return
     try:
         await client().set(key, json.dumps(value, default=str), ex=ttl or get_settings().cache_ttl_seconds)
     except Exception:  # noqa: BLE001
@@ -45,6 +54,8 @@ async def set_json(key: str, value: Any, ttl: int | None = None) -> None:
 
 
 async def delete_prefix(prefix: str) -> None:
+    if not enabled():
+        return
     try:
         keys = [k async for k in client().scan_iter(match=f"{prefix}*", count=500)]
         if keys:
@@ -53,7 +64,10 @@ async def delete_prefix(prefix: str) -> None:
         log.warning("cache invalidation failed", extra={"ctx": {"prefix": prefix}})
 
 
-async def ping() -> bool:
+async def ping() -> bool | None:
+    """True/False for a reachable/unreachable cache, None when caching is off."""
+    if not enabled():
+        return None
     try:
         return bool(await client().ping())
     except Exception:  # noqa: BLE001

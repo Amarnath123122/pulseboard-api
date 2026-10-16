@@ -41,6 +41,7 @@ services:
       PB_LOG_JSON: "true"
       PB_DATABASE_URL: postgresql+asyncpg://pulseboard:${POSTGRES_PASSWORD:-pulseboard-local}@postgres:5432/pulseboard
       PB_DB_AUTO_CREATE: "false"  # schema comes from Alembic in startup.sh
+      PB_CACHE_BACKEND: redis
       PB_REDIS_URL: redis://redis:6379/0
       PB_QUEUE_BACKEND: sqs
       PB_AWS_ENDPOINT_URL: http://sqs:5000

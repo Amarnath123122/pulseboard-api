@@ -92,3 +92,22 @@ Every setting comes from a `PB_*` environment variable; see `app/core/config.py`
 - **Redis cache:** set `PB_REDIS_URL` to use a real Redis. Without it, an in-process fake Redis is used.
 - **Docker:** run the whole stack with `docker compose up --build`. The UI is at http://localhost:8080 and the API at http://localhost:8000.
 - **Details:** see `docs/PROJECT_GUIDE.md` section 12.
+
+## Running modes
+| Mode | Command | Database | Cache | Queue |
+|---|---|---|---|---|
+| Local, no Docker | `uvicorn app.main:app --port 8000` + `python -m moto.server -p 5000` | SQLite | in-memory (`PB_CACHE_BACKEND=memory`) | SQS on moto |
+| Docker | `docker compose up --build` | Postgres 16 | Redis 7 | SQS on moto |
+| Azure | `scripts/azure-deploy.ps1 -OwnerEmail …` | Azure Postgres | none by default, or Azure Managed Redis with `-DeployRedis` | Azure Storage Queue |
+
+- Pause Azure billing with `scripts/azure-stop.ps1`. Running `azure-deploy.ps1` again restores the tier and starts everything.
+- `PB_CACHE_BACKEND`:
+  - `redis` is shared and correct with any number of workers.
+  - `memory` is for a single process only.
+  - `none` turns caching off.
+
+## CI/CD (GitHub Actions)
+- **`ci.yml`** runs on every push and pull request:
+  - **test:** ruff and pytest.
+  - **integration:** builds the Docker image, runs it against real Postgres, Redis and mock SQS, then runs `scripts/demo.py` end to end and checks the cache is up.
+- **`deploy.yml`** deploys `main` to App Service after CI passes. It only runs once the `AZURE_*` secrets and the `AZURE_WEBAPP_NAME` variable are set.

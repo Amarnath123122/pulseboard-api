@@ -21,4 +21,5 @@ async def readiness(session: AsyncSession = Depends(get_session)) -> JSONRespons
     except Exception:  # noqa: BLE001
         return JSONResponse({"status": "degraded", "database": "down"}, status_code=503)
     # Redis is a cache: if it is down the API still works, so report it without failing readiness.
-    return JSONResponse({"status": "ok", "database": "up", "cache": "up" if await cache.ping() else "down"})
+    cache_state = {True: "up", False: "down", None: "off"}[await cache.ping()]
+    return JSONResponse({"status": "ok", "database": "up", "cache": cache_state})
