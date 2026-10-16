@@ -15,7 +15,7 @@ param(
   [string]$Location = "centralindia",
   [switch]$SkipInfra
 )
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"  # native az warnings go to stderr; failures are caught by Assert-Ok
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 function New-Secret([int]$bytes = 32) {
@@ -69,7 +69,7 @@ try {
   tar -a -c -f $zip --exclude "__pycache__" app migrations alembic.ini requirements.txt startup.sh
   Assert-Ok "Packaging"
 } finally { Pop-Location }
-az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --timeout 900000 --output none
+az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --timeout 900000 --track-status false --only-show-errors --output none
 Assert-Ok "Code deployment"
 
 Write-Host "==> Smoke test"

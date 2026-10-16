@@ -30,8 +30,9 @@ param serviceKey string
 @description('Demo sign-in endpoint; turn off once an identity provider is integrated.')
 param enableDemoSignIn bool = true
 
-@description('Extra browser origins allowed by CORS, as a JSON array string.')
-param corsOrigins string = '["http://localhost:5173"]'
+@description('Static Web Apps (free tier) is only offered in some regions.')
+@allowed(['westus2', 'centralus', 'eastus2', 'westeurope', 'eastasia'])
+param webLocation string = 'eastasia'
 
 @description('Receives alert and budget emails.')
 param ownerEmail string
@@ -173,6 +174,15 @@ resource serviceKeyRef 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   properties: { value: serviceKey }
 }
 
+// ---------- Web UI ----------
+resource web 'Microsoft.Web/staticSites@2023-12-01' = {
+  name: 'pb-web-${suffix}'
+  location: webLocation
+  tags: tags
+  sku: { name: 'Free', tier: 'Free' }
+  properties: {}
+}
+
 // ---------- API ----------
 resource plan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: 'pb-plan-${suffix}'
@@ -217,7 +227,7 @@ resource api 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'PB_QUEUE_BACKEND', value: 'azure' }
         { name: 'PB_REVIEW_QUEUE_NAME', value: queueName }
         { name: 'PB_AZURE_QUEUE_ACCOUNT_URL', value: storage.properties.primaryEndpoints.queue }
-        { name: 'PB_CORS_ORIGINS', value: corsOrigins }
+        { name: 'PB_CORS_ORIGINS', value: '["https://${web.properties.defaultHostname}","http://localhost:5173"]' }
       ]
     }
   }
@@ -292,6 +302,8 @@ resource budget 'Microsoft.Consumption/budgets@2023-05-01' = if (deployBudget) {
 output apiAppName string = api.name
 output apiUrl string = 'https://${api.properties.defaultHostName}'
 output websocketUrl string = 'wss://${api.properties.defaultHostName}/ws/events'
+output webAppName string = web.name
+output webUrl string = 'https://${web.properties.defaultHostname}'
 output keyVaultName string = vault.name
 output postgresHost string = postgres.properties.fullyQualifiedDomainName
 output appInsightsName string = insights.name

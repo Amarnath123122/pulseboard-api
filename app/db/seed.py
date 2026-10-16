@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AssistantProfile
@@ -21,7 +22,11 @@ PROFILES = [
 
 
 async def seed_reference_data(session: AsyncSession) -> None:
+    # Several workers start at once; whoever loses the insert race just moves on.
     for profile in PROFILES:
         if await session.get(AssistantProfile, profile["key"]) is None:
             session.add(AssistantProfile(**profile))
-    await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
