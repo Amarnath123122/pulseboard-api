@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -16,7 +17,7 @@ from app.core.security import Principal, current_principal, issue_token
 from app.db.models import Board, Conversation, Tile
 from app.db.session import get_session
 from app.schemas import AssistantMessageIn, BoardOut, FollowUpIn, TileDataOut, TileOut, TokenIn, TokenOut
-from app.services import cache, layout, metrics
+from app.services import cache, keys, layout, metrics
 from app.services import catalog as catalog_service
 
 router = APIRouter(prefix="/api/v1")
@@ -65,36 +66,43 @@ async def my_overview(me: Principal = Depends(current_principal), session: Async
 @router.get("/boards/{board_id}", response_model=BoardOut, tags=["boards"])
 async def get_board(
     board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
-) -> Board:
-    return _owned(await session.get(Board, board_id), me)
+) -> dict[str, Any]:
+    return await _board_dict(session, board_id, me)
 
 
 @router.get("/boards/{board_id}/tiles", response_model=list[TileOut], tags=["boards"])
 async def board_tiles(
     board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
-) -> list[Tile]:
-    _owned(await session.get(Board, board_id), me)
+) -> list[dict[str, Any]]:
+    """Tiles in position order. Cache-aside under `tiles:<board>`; publish and follow-up changes invalidate it."""
+    await _board_dict(session, board_id, me)  # ownership check (itself cached)
+    key = keys.tiles(board_id)
+    if (hit := await cache.get_json(key)) is not None:
+        return hit
+    rows = (await session.execute(select(Tile).where(Tile.board_id == board_id).order_by(Tile.position))).scalars()
+    tiles = [TileOut.model_validate(t).model_dump(mode="json") for t in rows]
+    await cache.set_json(key, tiles)
+    return tiles
+
+
+@router.get("/boards/{board_id}/tile-data", response_model=list[TileDataOut], tags=["boards"])
+async def board_tile_data(
+    board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+) -> list[TileDataOut]:
+    """Data for every tile on a board in one request instead of one HTTP call per tile:
+    one SQL query for the tiles, one Redis MGET for cached results, one pipelined SET for the misses."""
+    await _board_dict(session, board_id, me)
     stmt = select(Tile).where(Tile.board_id == board_id).order_by(Tile.position)
-    return list((await session.execute(stmt)).scalars())
+    return await _tile_results(session, list((await session.execute(stmt)).scalars()))
 
 
 @router.get("/tiles/{tile_id}/data", response_model=TileDataOut, tags=["tiles"])
 async def tile_data(
     tile_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
 ) -> TileDataOut:
-    """Runs the tile's saved query. A source failure is reported in the body (status ERROR) so one broken
+    """Runs one tile's saved query. A source failure is reported in the body (status ERROR) so one broken
     source never blanks the whole board."""
-    tile = await _owned_tile(session, tile_id, me)
-    key = f"tile:{tile.id}:{datetime.now(UTC):%Y%m%d%H}"
-    if (cached := await cache.get_json(key)) is not None:
-        return TileDataOut(tile_id=tile.id, status="OK", presentation=tile.presentation, result=cached, cached=True)
-    try:
-        catalog = await catalog_service.load_catalog(session)
-        result = await asyncio.to_thread(metrics.run_query, catalog, tile.query_spec)
-        await cache.set_json(key, result)
-        return TileDataOut(tile_id=tile.id, status="OK", presentation=tile.presentation, result=result)
-    except metrics.MetricsError as exc:
-        return TileDataOut(tile_id=tile.id, status="ERROR", presentation=tile.presentation, error=str(exc))
+    return (await _tile_results(session, [await _owned_tile(session, tile_id, me)]))[0]
 
 
 @router.patch("/tiles/{tile_id}/follow-up", response_model=TileOut, tags=["tiles"])
@@ -106,18 +114,61 @@ async def set_follow_up(
     tile.follow_up_cd = body.follow_up_cd
     await session.commit()
     await session.refresh(tile)
+    await cache.delete(keys.tiles(tile.board_id))
     return tile
 
 
+async def _tile_results(session: AsyncSession, tiles: list[Tile]) -> list[TileDataOut]:
+    hour = f"{datetime.now(UTC):%Y%m%d%H}"
+    cached = await cache.get_many([keys.tile_data(t.id, hour) for t in tiles])
+    misses = [t for t, hit in zip(tiles, cached, strict=True) if hit is None]
+    fresh: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    if misses:
+        catalog = await catalog_service.load_catalog(session)  # loaded once (and itself cached) for all misses
+        for t in misses:
+            try:
+                fresh[t.id] = await asyncio.to_thread(metrics.run_query, catalog, t.query_spec)
+            except metrics.MetricsError as exc:
+                errors[t.id] = str(exc)
+        await cache.set_many({keys.tile_data(tid, hour): r for tid, r in fresh.items()})
+    out = []
+    for t, hit in zip(tiles, cached, strict=True):
+        if hit is not None:
+            out.append(TileDataOut(tile_id=t.id, status="OK", presentation=t.presentation, result=hit, cached=True))
+        elif t.id in fresh:
+            out.append(TileDataOut(tile_id=t.id, status="OK", presentation=t.presentation, result=fresh[t.id]))
+        else:
+            out.append(TileDataOut(tile_id=t.id, status="ERROR", presentation=t.presentation, error=errors[t.id]))
+    return out
+
+
+async def _board_dict(session: AsyncSession, board_id: str, me: Principal) -> dict[str, Any]:
+    """Board by id, cache-aside under `board:<id>`. Ownership is checked on every read, cached or not."""
+    key = keys.board(board_id)
+    board = await cache.get_json(key)
+    if board is None:
+        row = await session.get(Board, board_id)
+        if row is None:
+            raise NotFound("Board not found")
+        board = BoardOut.model_validate(row).model_dump(mode="json")
+        if row.build_status_cd != "BUILDING":  # never cache a transient state
+            await cache.set_json(key, board)
+    if board["user_id"] != me.user_id:  # 404 rather than 403: don't reveal other users' boards
+        raise NotFound("Board not found")
+    return board
+
+
 def _owned(board: Board | None, me: Principal) -> Board:
-    if board is None or board.user_id != me.user_id:  # 404 rather than 403: don't reveal other users' boards
+    if board is None or board.user_id != me.user_id:
         raise NotFound("Board not found")
     return board
 
 
 async def _owned_tile(session: AsyncSession, tile_id: str, me: Principal) -> Tile:
-    tile = await session.get(Tile, tile_id)
+    """Tile and ownership in one joined query, instead of loading the tile and then its board."""
+    stmt = select(Tile).join(Board, Board.id == Tile.board_id).where(Tile.id == tile_id, Board.user_id == me.user_id)
+    tile = (await session.execute(stmt)).scalar_one_or_none()
     if tile is None:
         raise NotFound("Tile not found")
-    _owned(await session.get(Board, tile.board_id), me)
     return tile

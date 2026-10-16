@@ -14,7 +14,7 @@ from app.core.security import Principal, current_principal
 from app.db.models import AssistantJob, Board, Tile
 from app.db.session import get_session
 from app.schemas import BoardOut, JobOut
-from app.services import cache
+from app.services import cache, keys
 from app.services import catalog as catalog_service
 
 router = APIRouter(prefix="/api/v1", tags=["browse"])
@@ -78,7 +78,7 @@ async def my_boards(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Every board the user owns, newest first, with tile and alert counts. Cached per user until it changes."""
-    key = f"boards:{me.user_id}:{q or ''}|{kind or ''}|{page}|{size}"
+    key = f"{keys.user_boards_prefix(me.user_id)}{q or ''}|{kind or ''}|{page}|{size}"
     if (hit := await cache.get_json(key)) is not None:
         return hit
     stmt = select(Board).where(Board.user_id == me.user_id)

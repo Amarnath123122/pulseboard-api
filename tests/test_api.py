@@ -202,3 +202,56 @@ async def test_meta_boards_and_jobs_lists(client):
     assert jobs["total"] == 1 and jobs["items"][0]["status_cd"] == "SUCCEEDED"
     other = (await client.get("/api/v1/boards", headers=await sign_in(client, "U11"))).json()
     assert other["total"] == 0
+
+
+async def test_board_tile_data_is_batched_cached_and_constant_queries(client):
+    """N+1 guard: the batch endpoint runs the same number of SQL statements however many tiles a board has."""
+    from sqlalchemy import event
+
+    from app.db.session import db
+
+    h = await sign_in(client, "U12")
+    board_id = await run_setup(client, h, None)
+    statements: list[str] = []
+
+    def count(*_args, **_kw):
+        statements.append("q")
+
+    event.listen(db.engine.sync_engine, "before_cursor_execute", count)
+    try:
+        first = (await client.get(f"/api/v1/boards/{board_id}/tile-data", headers=h)).json()
+        cold = len(statements)
+        statements.clear()
+        second = (await client.get(f"/api/v1/boards/{board_id}/tile-data", headers=h)).json()
+        warm = len(statements)
+    finally:
+        event.remove(db.engine.sync_engine, "before_cursor_execute", count)
+
+    assert len(first) > 3 and all(d["status"] == "OK" for d in first)
+    assert not any(d["cached"] for d in first) and all(d["cached"] for d in second)
+    assert cold <= 3, f"{cold} statements for {len(first)} tiles"  # tiles + catalog, never one per tile
+    assert warm <= 1  # board ownership and results come from Redis; only the tile list query remains
+
+
+async def test_follow_up_invalidates_cached_tiles(client):
+    h = await sign_in(client, "U13")
+    board_id = await run_setup(client, h, None)
+    tiles = (await client.get(f"/api/v1/boards/{board_id}/tiles", headers=h)).json()  # now cached
+    await client.patch(f"/api/v1/tiles/{tiles[0]['id']}/follow-up", json={"follow_up_cd": "DONE"}, headers=h)
+    again = (await client.get(f"/api/v1/boards/{board_id}/tiles", headers=h)).json()
+    assert again[0]["follow_up_cd"] == "DONE"
+
+
+async def test_scheduler_batches_queue_sends():
+    from moto import mock_aws
+
+    with mock_aws():
+        from app.services.queue import review_queue
+
+        review_queue.cache_clear()
+        sent = review_queue().send_many([{"boardId": str(i), "userId": "u"} for i in range(23)])
+        received = []
+        for _ in range(10):
+            received += review_queue().receive(10, 0)
+        assert sent == 23 and len(received) == 23
+        review_queue.cache_clear()

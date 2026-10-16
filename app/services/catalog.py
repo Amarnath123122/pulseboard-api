@@ -10,11 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import Conflict, NotFound
 from app.db.models import Metric
 from app.db.seed_metrics import INITIAL_METRICS
-from app.services import cache
+from app.services import cache, keys
 from app.services.metrics import Catalog
 
-CATALOG_KEY = "catalog:v1"
-LIST_PREFIX = "metrics:list:"
+CATALOG_KEY = keys.CATALOG
+LIST_PREFIX = keys.METRIC_PAGES_PREFIX
 FIELDS = ("area", "title", "unit", "base", "volatility", "higher_is_better", "owners", "sources", "enabled")
 SORTABLE = {"key": Metric.key, "title": Metric.title, "area": Metric.area, "updated_at": Metric.updated_at}
 
@@ -115,4 +115,4 @@ async def seed_if_empty(session: AsyncSession) -> None:
 async def _invalidate() -> None:
     await cache.delete_prefix(CATALOG_KEY)
     await cache.delete_prefix(LIST_PREFIX)
-    await cache.delete_prefix("tile:")
+    await cache.delete_prefix(keys.TILE_DATA_PREFIX)

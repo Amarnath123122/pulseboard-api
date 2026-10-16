@@ -39,9 +39,12 @@ async def review_scheduler(stop: asyncio.Event) -> None:
                     .with_for_update(skip_locked=True)  # several instances may run this loop
                 )
                 due = list((await session.execute(stmt)).scalars())
-                for board in due:
-                    await enqueue_review(board.id, board.user_id)
-                    board.next_review_at = None  # set again when the review publishes
+                if due:
+                    now = utcnow().isoformat()
+                    bodies = [{"boardId": b.id, "userId": b.user_id, "enqueuedAt": now} for b in due]
+                    await asyncio.to_thread(review_queue().send_many, bodies)  # batched, not one call per board
+                    for board in due:
+                        board.next_review_at = None  # set again when the review publishes
                 await session.commit()
                 if due:
                     log.info("reviews scheduled", extra={"ctx": {"count": len(due)}})

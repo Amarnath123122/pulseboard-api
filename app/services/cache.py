@@ -53,6 +53,39 @@ async def set_json(key: str, value: Any, ttl: int | None = None) -> None:
         log.warning("cache write failed", extra={"ctx": {"key": key}})
 
 
+async def get_many(keys: list[str]) -> list[Any | None]:
+    """One round trip (MGET) for many keys; misses come back as None."""
+    if not enabled() or not keys:
+        return [None] * len(keys)
+    try:
+        return [json.loads(v) if v is not None else None for v in await client().mget(keys)]
+    except Exception:  # noqa: BLE001
+        log.warning("cache mget failed", extra={"ctx": {"count": len(keys)}})
+        return [None] * len(keys)
+
+
+async def set_many(items: dict[str, Any], ttl: int | None = None) -> None:
+    """Pipeline many SETs into one round trip."""
+    if not enabled() or not items:
+        return
+    try:
+        pipe = client().pipeline(transaction=False)
+        for k, v in items.items():
+            pipe.set(k, json.dumps(v, default=str), ex=ttl or get_settings().cache_ttl_seconds)
+        await pipe.execute()
+    except Exception:  # noqa: BLE001
+        log.warning("cache pipeline set failed", extra={"ctx": {"count": len(items)}})
+
+
+async def delete(*keys: str) -> None:
+    if not enabled() or not keys:
+        return
+    try:
+        await client().delete(*keys)
+    except Exception:  # noqa: BLE001
+        log.warning("cache delete failed", extra={"ctx": {"keys": len(keys)}})
+
+
 async def delete_prefix(prefix: str) -> None:
     if not enabled():
         return

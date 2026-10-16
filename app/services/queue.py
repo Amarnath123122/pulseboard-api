@@ -24,6 +24,7 @@ class QueueMessage:
 
 class ReviewQueue(Protocol):
     def send(self, body: dict[str, Any]) -> str: ...
+    def send_many(self, bodies: list[dict[str, Any]]) -> int: ...
     def receive(self, max_messages: int, wait_seconds: int) -> list[QueueMessage]: ...
     def delete(self, message: QueueMessage) -> None: ...
 
@@ -58,6 +59,16 @@ class SqsQueue:
     def send(self, body: dict[str, Any]) -> str:
         return self.client.send_message(QueueUrl=self.url, MessageBody=json.dumps(body, default=str))["MessageId"]
 
+    def send_many(self, bodies: list[dict[str, Any]]) -> int:
+        """SendMessageBatch: 10 messages per call instead of one call per message."""
+        for i in range(0, len(bodies), 10):
+            chunk = bodies[i:i + 10]
+            entries = [{"Id": str(n), "MessageBody": json.dumps(b, default=str)} for n, b in enumerate(chunk)]
+            failed = self.client.send_message_batch(QueueUrl=self.url, Entries=entries).get("Failed", [])
+            if failed:
+                raise RuntimeError(f"{len(failed)} review messages were not enqueued")
+        return len(bodies)
+
     def receive(self, max_messages: int = 5, wait_seconds: int = 5) -> list[QueueMessage]:
         resp = self.client.receive_message(QueueUrl=self.url, MaxNumberOfMessages=max_messages,
                                            WaitTimeSeconds=wait_seconds, AttributeNames=["ApproximateReceiveCount"])
@@ -91,6 +102,12 @@ class AzureStorageQueue:
 
     def send(self, body: dict[str, Any]) -> str:
         return self.client.send_message(json.dumps(body, default=str)).id
+
+    def send_many(self, bodies: list[dict[str, Any]]) -> int:
+        # Storage Queues have no batch send; messages go out over one pooled HTTPS connection.
+        for b in bodies:
+            self.send(b)
+        return len(bodies)
 
     def receive(self, max_messages: int = 5, wait_seconds: int = 5) -> list[QueueMessage]:
         # Storage Queues have no long polling; the worker sleeps between empty polls instead.

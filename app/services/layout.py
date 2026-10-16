@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.errors import Conflict, NotFound
 from app.db.models import Board, BoardVersion, Tile, as_utc, new_id, utcnow
 from app.schemas import LayoutPlan, PlannedBoard
-from app.services import cache
+from app.services import cache, keys
 from app.services.events import hub
 
 log = logging.getLogger(__name__)
@@ -135,7 +135,9 @@ async def publish(
     await session.commit()
     await session.refresh(root)
 
-    await cache.delete_prefix(f"boards:{root.user_id}:")
+    family = list(ids_by_slot.values()) + [b.id for b in children.values()]
+    await cache.delete(*[keys.board(i) for i in family], *[keys.tiles(i) for i in family])
+    await cache.delete_prefix(keys.user_boards_prefix(root.user_id))
     log.info("layout published", extra={"ctx": {"board_id": root.id, "version": root.version}})
     await hub.publish(root.user_id, {"type": "board.published", "boardId": root.id, "version": root.version})
     return root
@@ -151,6 +153,7 @@ async def release(session: AsyncSession, *, board_id: str, claim_holder: str, ge
     root.claim_expires_at = None
     root.build_status_cd = "LIVE" if root.version > 0 else "FAILED"
     await session.commit()
+    await cache.delete(keys.board(root.id))
     await hub.publish(root.user_id, {"type": "board.published", "boardId": root.id, "version": root.version})
 
 
