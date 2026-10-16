@@ -111,3 +111,11 @@ Every setting comes from a `PB_*` environment variable; see `app/core/config.py`
   - **test:** ruff and pytest.
   - **integration:** builds the Docker image, runs it against real Postgres, Redis and mock SQS, then runs `scripts/demo.py` end to end and checks the cache is up.
 - **`deploy.yml`** deploys `main` to App Service after CI passes. It only runs once the `AZURE_*` secrets and the `AZURE_WEBAPP_NAME` variable are set.
+
+## Documentation
+| Doc | What's in it |
+|---|---|
+| [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md) | What the app does, the flows, the data model, the API, a code tour, real demo output |
+| [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | Full architecture: C4 diagrams, sequences, state machines, security, failure modes |
+| [docs/CACHING_AND_PERFORMANCE.md](docs/CACHING_AND_PERFORMANCE.md) | Redis keys, TTLs, invalidation, the N+1 fixes and the test that guards them |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Local, Docker and Azure runs; CI/CD setup; configuration; troubleshooting |

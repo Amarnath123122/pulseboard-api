@@ -202,7 +202,8 @@ Alembic migrations in `migrations/versions/` own the schema, and Azure runs `ale
 | GET | `/api/v1/boards/overview` | The caller's overview board (404 before setup) |
 | GET | `/api/v1/boards/{id}` | Any board the caller owns |
 | GET | `/api/v1/boards/{id}/tiles` | Tiles in position order |
-| GET | `/api/v1/tiles/{id}/data` | Runs the tile's query: `{status: OK\|ERROR, result, error}` |
+| GET | `/api/v1/tiles/{id}/data` | Runs one tile's query: `{status: OK\|ERROR, result, error, cached}` |
+| GET | `/api/v1/boards/{id}/tile-data` | Every tile's data in one call (use this for whole boards) |
 | PATCH | `/api/v1/tiles/{id}/follow-up` | `{follow_up_cd: SEEN\|DONE\|PENDING\|NONE}` |
 | WS | `/ws/events?token=…` | Pushes `board.building` and `board.published` events |
 
@@ -258,7 +259,10 @@ pulseboard-api/
 │   │   └── reviewer.py      The scheduled review job
 │   └── services/
 │       ├── layout.py        claim / publish / release (section 4)
-│       ├── metrics.py       Mock metrics: catalog, query, projection, grading
+│       ├── metrics.py       Mock metrics source: query, projection, grading (catalog passed in)
+│       ├── catalog.py       Metric catalog CRUD, search, pagination, cached lookup
+│       ├── cache.py         Redis / in-memory / off; MGET, pipelines, prefix invalidation
+│       ├── keys.py          Every Redis key name in one place
 │       ├── preferences.py   Save / load preferences
 │       ├── queue.py         SQS (moto) and Azure Storage Queue adapters
 │       ├── workers.py       Review scheduler + worker (backoff, poison messages)
@@ -418,64 +422,87 @@ This is `python scripts/demo.py` against the local API, with SQLite and mock AWS
 - **Postgres is reachable from any Azure service** through its firewall rule. Next: VNet integration with private access.
 - **No API gateway or autoscale on B1**, to keep costs low. Next: move to S1/P0v3 and add API Management when there is traffic.
 - **The assistants are rules, not an AI model**, and the metrics are mocked. Section 7 explains how to swap in real ones.
-- **The frontend is not built yet.** It is planned as an Angular monorepo.
+- **The frontend is built** as an Angular 17 monorepo (`pulseboard-web`). See section 12.5.
 
-## 12. Version 2: catalog CRUD, cache, navigation, Docker
+## 12. Version 2: catalog, Redis, navigation, Docker, CI
 
-### Metric catalog in the database (nothing hardcoded)
-| Before | Now |
+> In-depth guides: [`CACHING_AND_PERFORMANCE.md`](CACHING_AND_PERFORMANCE.md) (Redis keys, invalidation, N+1 fixes)
+> and [`RUNBOOK.md`](RUNBOOK.md) (local, Docker, Azure, CI/CD, troubleshooting).
+
+### 12.1 Nothing hardcoded
+| Data | Source |
 |---|---|
-| Metrics hardcoded in `metrics.py` | `metrics` table (migration `0002`), seeded once from `app/db/seed_metrics.py`, then managed in the UI |
-| Setup questions listed fixed areas and regions | Areas come from the catalog; regions, units and page sizes come from settings (`PB_REGIONS`, `PB_UNITS`, `PB_PAGE_SIZES`) |
-| Area matching used a fixed word list | Matches catalog area names and metric-title words |
-| UI had fixed units, page sizes and API URLs | UI reads `/api/v1/meta` and loads runtime `/config.json` |
+| Metric catalog (title, unit, owners, sources, direction, typical level, volatility) | `metrics` table (migration `0002`). Seeded once from `app/db/seed_metrics.py` when the table is empty, then managed in the UI. |
+| Setup questions: area choices | Distinct `area` values of enabled metrics |
+| Setup questions: region choices, units, page sizes | Settings `PB_REGIONS`, `PB_UNITS`, `PB_PAGE_SIZES`, served by `GET /api/v1/meta` |
+| Which units are counts or volumes | `PB_COUNT_UNITS`, `PB_VOLUME_UNITS` |
+| UI menus and filters (board kinds, job types and statuses, follow-ups) | `GET /api/v1/meta` |
+| UI API endpoints | `/config.json`, read at runtime. The deploy writes it per environment, so one build runs everywhere. |
+| Answer matching | Catalog area names and metric-title words, not a fixed synonym list |
 
-### New API
+### 12.2 API added in version 2
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/v1/meta` | regions, units, areas, page sizes, enums used for menus |
-| GET | `/api/v1/metrics?q&area&enabled&sort&desc&page&size` | search and paginate; `cached: true` when served by Redis |
-| GET / POST / PUT / DELETE | `/api/v1/metrics[/{key}]` | full CRUD; 409 on duplicate key, 422 on bad unit or format |
+| GET | `/api/v1/meta` | regions, units, areas, page sizes, enums |
+| GET | `/api/v1/metrics?q&area&enabled&sort&desc&page&size` | search, filter, sort, paginate; `cached` flag |
+| GET / POST / PUT / DELETE | `/api/v1/metrics[/{key}]` | full CRUD; 201, 409 on duplicate, 422 on validation error, 204 on delete |
 | GET | `/api/v1/metrics/areas` | distinct areas |
-| GET | `/api/v1/boards?q&kind&page&size` | the user's boards with tile and alert counts |
+| GET | `/api/v1/boards?q&kind&page&size` | the user's boards with tile and alert counts (one `GROUP BY`) |
+| GET | `/api/v1/boards/{id}/tile-data` | **every tile's data in one call** (replaces N per-tile calls) |
 | GET | `/api/v1/jobs?job_type&status&page&size` | the user's setup and review history |
 
-### Redis cache
+### 12.3 Redis cache (cache-aside)
 | Key | TTL | Invalidated by |
 |---|---|---|
-| `catalog:v1` | 5 min | any metric create, update or delete |
-| `metrics:list:<query>` | 60 s | any metric write |
-| `tile:<id>:<hour>` | 5 min | metric write (results also roll over hourly) |
-| `boards:<user>:<query>` | 60 s | a publish for that user |
+| `catalog:v1` | 5 min | metric create, update or delete |
+| `metrics:list:*` | 60 s | metric write |
+| `board:<id>` | 5 min (never while `BUILDING`) | publish (whole family), release |
+| `tiles:<board>` | 5 min | publish, follow-up change |
+| `tile:<tile>:<hour>` | 5 min | metric write; hourly rollover |
+| `boards:<user>:*` | 60 s | publish for that user |
 
-- `PB_REDIS_URL` set: a real Redis (Docker `redis:7`, or Azure Managed Redis).
-- `PB_REDIS_URL` unset: an in-process fake Redis with the same API, so no server is needed.
-- Every cache error falls back to the database. `/readyz` reports `cache: up|down` without failing.
+`PB_CACHE_BACKEND` sets the mode:
+- `redis`: shared, used in Docker, CI and Azure with `-DeployRedis`.
+- `memory`: single process only, used for local runs and tests.
+- `none`: caching off, the Azure default, correct with any number of workers.
 
-### Frontend navigation
-The sidebar has **Overview · My boards · Metric catalog · Activity · Setup assistant**.
-- The active link is highlighted, and the sidebar collapses to a top bar on phones.
-- The footer shows WebSocket status, the signed-in user, and sign-out.
-- Toasts confirm saves and deletes, show errors, and announce `board.published` events.
-- Every list uses the shared pager, with page sizes taken from `/meta`.
+Any Redis failure falls back to the database. Ownership is re-checked on every cached read.
 
-### Realtime
-- **SSE:** setup-assistant turns stream word by word.
-- **WebSocket `/ws/events`:** carries `board.building` and `board.published`. Board pages refetch, Activity refreshes, and a toast appears. It reconnects with backoff, and sends a ping every 25 s.
-- **Postgres `LISTEN/NOTIFY`:** relays events between API instances.
+### 12.4 N+1 fixes
+| Before | After |
+|---|---|
+| One HTTP request per tile (each doing 2 SQL lookups and a catalog load) | `GET /boards/{id}/tile-data`: 1 SQL query, 1 `MGET`, 1 pipelined `SET` |
+| Tile, then board, to check ownership (2 queries) | One `JOIN` |
+| Per-board count queries for "My boards" | One `GROUP BY` with `SUM(CASE …)` |
+| One SQS call per due board | `send_message_batch`, 10 per call |
 
-### Docker
-`pulseboard-api/docker-compose.yml` runs the whole stack:
+A test counts SQL statements: the batch endpoint runs at most 3 statements cold and 1 warm, however many tiles there are.
 
-| Service | Image | Port |
-|---|---|---|
-| postgres | postgres:16-alpine | 5432 |
-| redis | redis:7-alpine (LRU, 128 MB) | 6379 |
-| sqs (mock AWS) | motoserver/moto | 5000 |
-| api | `pulseboard-api/Dockerfile` (multi-stage, non-root, healthcheck, Alembic on start) | 8000 |
-| web | `pulseboard-web/Dockerfile` (Node build → unprivileged nginx, SPA fallback, `config.json` written from `API_URL`/`WS_URL`) | 8080 |
+### 12.5 Frontend
+- **Angular 17 monorepo:** the `pulseboard` app plus the `data-access` library.
+- **Sidebar:** Overview · My boards · Metric catalog · Activity · Setup assistant. The active link is highlighted, and the sidebar collapses to a top bar on phones.
+- **Live status:** the sidebar footer shows WebSocket status, the user, and sign-out.
+- **Guided setup:** a progress bar and clickable answer chips built from `/meta`.
+- **Orientation:** every page has a one-line explanation, boards show breadcrumbs (`Overview › Detail`), and the overview has a priority legend.
+- **Feedback:** toasts for saves, deletes, errors and `board.published` events.
+- **Lists:** a shared pager whose page sizes come from `/meta`.
+- **Dates:** every API timestamp is ISO-8601 UTC with an offset, so it parses the same on SQLite and Postgres.
 
-```bash
-cd pulseboard-api && docker compose up --build
-# UI  http://localhost:8080   API docs http://localhost:8000/docs
-```
+### 12.6 Realtime
+| Channel | Use |
+|---|---|
+| SSE (`POST /assistant/messages`) | Setup-assistant replies stream word by word |
+| WebSocket `/ws/events` | `board.building`, `board.published`. Boards refetch, Activity refreshes, a toast appears. Backoff reconnect, ping every 25 s. |
+| Postgres `LISTEN/NOTIFY` | Relays events between instances and workers |
+
+### 12.7 Docker and CI
+- **`docker compose up --build`** runs postgres:16, redis:7, moto (mock AWS SQS), the API (multi-stage, non-root, healthcheck, Alembic on start) and the web image (Node build, then unprivileged nginx with SPA fallback and `config.json` from env).
+- **API CI:** ruff, pytest, and an integration job that runs the image against real Postgres, Redis and moto, then runs `scripts/demo.py`.
+- **Web CI:** builds the app, the library and the Docker image.
+- **Deploy workflows:** idle until the Azure secrets and variables are set.
+
+### 12.8 Azure, without surprise costs
+- `azure-deploy.ps1` resumes everything after a pause.
+- `azure-stop.ps1` stops the API, moves the plan to F1 and stops Postgres.
+- Redis is opt-in with `-DeployRedis`.
+- A monthly budget alert and a 5xx alert email the owner.
