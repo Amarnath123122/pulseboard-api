@@ -84,8 +84,8 @@ try {
   Assert-Ok "Packaging"
 } finally { Pop-Location }
 # Startup (pip install + migrations) can outlast the CLI's own status polling, so readiness is checked below instead.
-az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --timeout 900000 `
-  --track-status false --only-show-errors --output none
+az webapp deploy --resource-group $ResourceGroup --name $app --src-path $zip --type zip --async true `
+  --only-show-errors --output none
 Assert-Ok "API deployment"
 
 Write-Host "==> Waiting for the API"
@@ -101,7 +101,7 @@ if (-not $SkipWeb) {
   Assert-Ok "Reading Static Web Apps token"
   Push-Location $WebRepo
   try {
-    npm ci --no-audit --no-fund; Assert-Ok "npm ci"
+    if (-not (Test-Path node_modules)) { npm ci --no-audit --no-fund; Assert-Ok "npm ci" }  # reuse a local install (a running dev server locks it)
     npm run build; Assert-Ok "Web build"
     # Runtime config: the one build artifact is pointed at this environment's API.
     @{ apiUrl = $out.apiUrl.value; wsUrl = $out.websocketUrl.value } | ConvertTo-Json |
