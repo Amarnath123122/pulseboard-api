@@ -1,126 +1,87 @@
 # pulseboard-api
 
-Pulseboard turns a short conversation with a setup assistant into a personal **board** of metric **tiles**. Tiles that need attention become **alerts**. Each alert links to a **detail** board and a **briefing** board. A background **reviewer** re-checks every board on a schedule.
+The Pulseboard domain service:
+- boards, tiles and the metric catalog
+- the setup assistant, with replies streamed over SSE
+- scheduled reviews, run through a queue
+- live updates over WebSocket
+- a Redis cache
 
-This API is built with FastAPI, async SQLAlchemy, Postgres or SQLite, a queue (SQS locally, Azure Storage Queue in Azure) and WebSockets.
+It's one of four repos:
 
-## Flows
-
-| Flow | How it works |
+| Repo | Role |
 |---|---|
-| **Setup** | `POST /api/v1/assistant/messages` streams each assistant turn as SSE. Each reply is saved as a preference. After the last answer, or a skip, the assistant **claims** the overview board, builds it in the background, **publishes** it, and the WebSocket sends `board.published`. |
-| **Reading** | `GET /api/v1/boards/overview`, `GET /api/v1/boards/{id}`, `GET /api/v1/boards/{id}/tiles`, `GET /api/v1/tiles/{id}/data`. A tile whose query fails returns `status: ERROR` without failing the request. |
-| **Follow-up** | `PATCH /api/v1/tiles/{id}/follow-up` (`SEEN` / `DONE`). The value is kept across reviews. |
-| **Review** | The scheduler sends due boards to the queue. The worker then: loads the assistant profile → records an `assistant_jobs` row → claims the board → loads preferences → reads the board → queries metrics → publishes → sends `board.published`. |
-| **Realtime** | `WS /ws/events?token=…`. With Postgres, events are relayed through `LISTEN/NOTIFY`, so they reach users connected to any instance. |
-| **Internal** (`X-Service-Key`) | `/internal/v1/assistant-profiles/{key}`, `/preferences`, `/layouts/claim`, `/layouts/{id}/publish`, `/reviews/{id}`, `/reviews/{id}/run`, `/jobs` |
-| **Ops** | `/healthz` (liveness), `/readyz` (database check), `/docs` (not served in production) |
+| [pulseboard-identity](https://github.com/Amarnath123122/pulseboard-identity) | Accounts, RS256 tokens and JWKS, refresh rotation, RBAC |
+| **pulseboard-api** (this repo) | Domain logic. **Verifies** identity tokens and authorizes each route by permission. |
+| [pulseboard-web](https://github.com/Amarnath123122/pulseboard-web) | Angular 17 monorepo UI |
+| [pulseboard-platform](https://github.com/Amarnath123122/pulseboard-platform) | API gateway, Docker Compose for the full system, Azure Bicep, deploy scripts, system docs, live evidence |
 
-### Safe concurrent publishing
-- `claim` reserves a board for one job for a limited time and increments its **generation**.
-- `publish` is accepted only from the current claim holder at the current generation. A slow or abandoned job gets `409` and cannot overwrite newer work.
-- A publish writes the overview, detail and briefing boards in **one transaction**. Boards and tiles are matched by `slot_key`.
-- Every publish adds one `board_versions` row per board.
+## What it does
+1. **Setup:** the assistant asks three questions (team, areas, region) over `POST /api/v1/assistant/messages`, streamed as SSE. It then **claims** the user's overview board, builds it in the background, and **publishes** it. The browser hears `board.published` on `/ws/events`.
+2. **Boards:** overview, detail and briefing boards with tiles. Alerts come first. `GET /api/v1/boards/{id}/tile-data` returns every tile's data in one call.
+3. **Metric catalog:** full CRUD with search, filters, sorting and pagination. It's stored in the database and editable in the UI.
+4. **Reviews:** a scheduler queues due boards (SQS via moto locally, Azure Storage Queue in Azure). The worker re-plans and republishes each board, keeping the user's follow-ups.
+5. **Safety:** publishing is fenced by claim, generation and one transaction per publish. Redis is used cache-aside with targeted invalidation. Tests guard against N+1 queries.
 
-### Tables
-`boards`, `board_versions`, `tiles`, `assistant_profiles`, `assistant_jobs`, `user_preferences`, `conversations`, `conversation_messages`. The schema is managed by Alembic (`migrations/`).
+## Security model
+- **Tokens:** the API holds **no passwords or signing keys**. It verifies RS256 access tokens from `pulseboard-identity` against its JWKS (`PB_JWKS_URL`, cached and refetched when an unknown key id appears), checking `iss`, `aud`, `exp` and `typ`.
+- **Permissions:** each route requires a permission from the token's `perms` claim, for example `require("metrics:write")`. A missing permission gets **403**, with the missing permission named in the error.
+- **Ownership:** boards belong to the token's `sub`. Another user's board returns **404**.
+- **Internal endpoints:** `/internal/v1/*` needs `X-Service-Key`, and no gateway exposes it.
 
-## Run locally
+| Permission | Routes |
+|---|---|
+| `boards:read` | boards, tiles, tile data, meta, board list |
+| `boards:follow_up` | `PATCH /api/v1/tiles/{id}/follow-up` |
+| `setup:run` | `POST /api/v1/assistant/messages` |
+| `jobs:read` | `GET /api/v1/jobs` |
+| `metrics:read` / `metrics:write` | catalog reads / create, update, delete |
 
-Locally, AWS is mocked: SQS runs on a moto server on `localhost:5000`.
+## Run
+**The whole system (recommended):** use `pulseboard-platform`:
+```bash
+cd ../pulseboard-platform && docker compose up --build -d     # http://localhost:8080
+```
 
+**This service alone:**
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev]"
+python -m venv .venv; .\.venv\Scripts\python -m pip install -e ".[dev]"
 copy .env.example .env
-.\.venv\Scripts\python -m moto.server -p 5000     # terminal 1: mock AWS
-.\.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000   # terminal 2
+.\.venv\Scripts\python -m moto.server -p 5000                          # mock AWS SQS
+.\.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000    # needs identity on :8100 for JWKS
 ```
-Or run `scripts\dev.ps1`. Then open http://localhost:8000/docs.
-
-If moto isn't running, the API still serves requests. The review worker logs a warning and retries with backoff.
-
-To try the Azure queue locally, run Azurite and set these two variables:
-```
-PB_QUEUE_BACKEND=azure
-PB_AZURE_QUEUE_CONNECTION_STRING=UseDevelopmentStorage=true
-```
+API docs are at http://localhost:8000/docs.
 
 ## Test
 ```powershell
-.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python -m pytest -q      # tests mint identity-style RS256 tokens with a throwaway key
 .\.venv\Scripts\python -m ruff check .
+python scripts/demo.py <gateway-url> <service-key> <api-url>   # end-to-end walkthrough
 ```
 
-## Deploy to Azure (low cost)
+## CI/CD
+- **`ci.yml`:**
+  - `test`: ruff and pytest.
+  - `integration`: builds the Docker image, runs it against Postgres, Redis and moto with a minted token, then runs `demo.py`.
+- **`deploy.yml`:** zip-deploys to App Service after CI passes on `main`, once the Azure secrets are set.
+- **Full-system deploy:** `pulseboard-platform/scripts/azure-deploy.ps1`.
 
-```powershell
-az login
-./scripts/azure-deploy.ps1 -OwnerEmail you@example.com            # rg-pulseboard in centralindia
-```
-
-| Resource | Tier | Why |
-|---|---|---|
-| App Service (Linux) | B1 | Cheapest tier with Always On, which the background worker needs. Supports WebSockets. |
-| PostgreSQL Flexible Server | B1ms, 32 GB | Covered by the Azure free account's 750 hours/month |
-| Storage account | Standard LRS | Review queue. Managed identity only; shared keys are disabled. |
-| Key Vault | Standard, RBAC | Holds the database URL, JWT secret and service key, read through Key Vault references. |
-| Application Insights + Log Analytics | 0.15 GB/day cap | Stays within the free ingestion allowance |
-| Alerts | 5xx metric alert, monthly budget | Emails `OwnerEmail` |
-
-Generated secrets are saved in `infra/secrets.local.json`, which is git-ignored, so re-runs reuse them.
-- To redeploy code only: `./scripts/azure-deploy.ps1 -OwnerEmail … -SkipInfra`
-- To remove everything: `az group delete -n rg-pulseboard`
-
-**CI/CD:** `.github/workflows/ci.yml` runs lint and tests on every push. `deploy.yml` deploys `main` to App Service after CI passes. It signs in to Azure with OIDC and needs:
-- secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
-- variable: `AZURE_WEBAPP_NAME`
-
-### To scale up later
-- Raise `appServiceSku` to `S1` or `P0v3` to unlock autoscale and deployment slots.
-- Put API Management in front of the API.
-- Move Postgres behind VNet integration with private access.
-- Replace demo sign-in (`PB_ENABLE_DEV_TOKEN=false`) with Entra ID.
-
-## Configuration
-
-Every setting comes from a `PB_*` environment variable; see `app/core/config.py` and `.env.example`. In production the app refuses to start if it would use the default JWT secret or service key.
-
-## Version 2
-- **Metric catalog:** stored in the database, with full CRUD, search, sort and pagination at `/api/v1/metrics`.
-- **Browsing:** `/api/v1/meta`, `/api/v1/boards` and `/api/v1/jobs`.
-- **Redis cache:** set `PB_REDIS_URL` to use a real Redis. Without it, an in-process fake Redis is used.
-- **Docker:** run the whole stack with `docker compose up --build`. The UI is at http://localhost:8080 and the API at http://localhost:8000.
-- **Details:** see `docs/PROJECT_GUIDE.md` section 12.
-
-## Running modes
-| Mode | Command | Database | Cache | Queue |
-|---|---|---|---|---|
-| Local, no Docker | `uvicorn app.main:app --port 8000` + `python -m moto.server -p 5000` | SQLite | in-memory (`PB_CACHE_BACKEND=memory`) | SQS on moto |
-| Docker | `docker compose up --build` | Postgres 16 | Redis 7 | SQS on moto |
-| Azure | `scripts/azure-deploy.ps1 -OwnerEmail …` | Azure Postgres | none by default, or Azure Managed Redis with `-DeployRedis` | Azure Storage Queue |
-
-- Pause Azure billing with `scripts/azure-stop.ps1`. Running `azure-deploy.ps1` again restores the tier and starts everything.
-- `PB_CACHE_BACKEND`:
-  - `redis` is shared and correct with any number of workers.
-  - `memory` is for a single process only.
-  - `none` turns caching off.
-
-## CI/CD (GitHub Actions)
-- **`ci.yml`** runs on every push and pull request:
-  - **test:** ruff and pytest.
-  - **integration:** builds the Docker image, runs it against real Postgres, Redis and mock SQS, then runs `scripts/demo.py` end to end and checks the cache is up.
-- **`deploy.yml`** deploys `main` to App Service after CI passes. It only runs once the `AZURE_*` secrets and the `AZURE_WEBAPP_NAME` variable are set.
+## Configuration (`PB_*`)
+| Setting | Purpose |
+|---|---|
+| `DATABASE_URL` | SQLite locally, Postgres in Docker and Azure |
+| `JWKS_URL` or `JWT_PUBLIC_KEY_B64` | Token verification: the identity JWKS, or a pinned key |
+| `JWT_ISSUER`, `JWT_AUDIENCE` | `pulseboard-identity`, `pulseboard` |
+| `CACHE_BACKEND`, `REDIS_URL` | `redis`, `memory` or `none` |
+| `QUEUE_BACKEND` | `sqs` (moto locally) or `azure` |
+| `REGIONS`, `UNITS`, `PAGE_SIZES` | Data shown in the UI, served by `/api/v1/meta` |
+| `SERVICE_KEY` | Protects `/internal/v1/*` |
 
 ## Documentation
 | Doc | What's in it |
 |---|---|
-| [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md) | What the app does, the flows, the data model, the API, a code tour, real demo output |
-| [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | Full architecture: C4 diagrams, sequences, state machines, security, failure modes |
-| [docs/CACHING_AND_PERFORMANCE.md](docs/CACHING_AND_PERFORMANCE.md) | Redis keys, TTLs, invalidation, the N+1 fixes and the test that guards them |
-| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Local, Docker and Azure runs; CI/CD setup; configuration; troubleshooting |
-
-## Version 3: microservices
-- **Authentication has moved** to the `pulseboard-identity` service. This API holds no passwords or keys. It verifies RS256 tokens against identity's JWKS (`PB_JWKS_URL`) and authorizes each route with the token's `perms` (`require("metrics:write")` and so on).
-- **Moved to `pulseboard-platform`:** Docker Compose, the API gateway, the Azure Bicep and the deploy scripts. See `pulseboard-platform/docs/MICROSERVICES.md`.
-- **Tests and CI** mint identity-style tokens with a throwaway key (`scripts/mint_token.py`), so this repo tests on its own.
+| [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md) | Flows, data model, API, a code tour, real demo output |
+| [docs/CACHING_AND_PERFORMANCE.md](docs/CACHING_AND_PERFORMANCE.md) | Redis keys, TTLs, invalidation, the N+1 fixes |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Run, deploy, operate, troubleshoot |
+| [pulseboard-platform/docs/MICROSERVICES.md](https://github.com/Amarnath123122/pulseboard-platform/blob/main/docs/MICROSERVICES.md) | Services, gateway, auth and RBAC, reliability, cost, the end-to-end workflow |
+| [pulseboard-platform/docs/EVIDENCE.md](https://github.com/Amarnath123122/pulseboard-platform/blob/main/docs/EVIDENCE.md) | Captured proof from CI, Docker and the live Azure deployment |
