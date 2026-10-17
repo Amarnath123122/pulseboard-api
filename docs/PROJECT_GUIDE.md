@@ -1,5 +1,11 @@
 # Pulseboard: the project from end to end
 
+> **Current architecture (version 3):** Pulseboard is now four repos: `pulseboard-identity` (accounts, RS256 tokens, JWKS, RBAC), `pulseboard-api`, `pulseboard-web` and `pulseboard-platform` (API gateway, Compose, Azure Bicep, deploy scripts).
+> - **Sign-in:** the demo token endpoint is gone. Users register or sign in with email and password through the gateway, and the API verifies RS256 tokens via JWKS (no shared HS256 secret).
+> - **Where to read more:** [MICROSERVICES.md](https://github.com/Amarnath123122/pulseboard-platform/blob/main/docs/MICROSERVICES.md) for services, gateway, auth/RBAC and workflow; [RUNBOOK.md](RUNBOOK.md) for commands.
+> - **Older sections:** where they mention `/auth/dev-token`, `PB_JWT_SECRET`/HS256, or Compose and Azure scripts inside `pulseboard-api`, read them as superseded by the above.
+
+
 This guide explains what Pulseboard is, how a request moves through it, how the code is organised, and how to run it on your laptop and on Azure. It ends with real output from a run.
 
 ---
@@ -193,11 +199,11 @@ Alembic migrations in `migrations/versions/` own the schema, and Azure runs `ale
 
 ## 6. API reference
 
-### Public (the user's JWT goes in `Authorization: Bearer …`)
+### Public (identity-issued access token in `Authorization: Bearer …`; each route needs a permission, see the API README)
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/api/v1/auth/dev-token` | Demo sign-in. Returns a JWT for any user id. Turn off with `PB_ENABLE_DEV_TOKEN=false`. |
+| POST | `/api/v1/auth/register`, `/login`, `/refresh`, `/logout` | **Served by `pulseboard-identity`** through the gateway. Returns an RS256 access token (15 min) and a rotating refresh token. |
 | POST | `/api/v1/assistant/messages` | One setup turn, streamed as `text/event-stream`. Body: `{conversation_id?, action: start\|reply\|skip, text}` |
 | GET | `/api/v1/boards/overview` | The caller's overview board (404 before setup) |
 | GET | `/api/v1/boards/{id}` | Any board the caller owns |
@@ -418,7 +424,7 @@ This is `python scripts/demo.py` against the local API, with SQLite and mock AWS
 
 ## 11. Known limits and next steps
 
-- **Sign-in is demo-only** (`/auth/dev-token`). Next: Microsoft Entra ID (OIDC), then set `PB_ENABLE_DEV_TOKEN=false`.
+- **Sign-in is real** (version 3): the `pulseboard-identity` service handles email/password, RS256 tokens, refresh rotation and RBAC. Next step: federate with Microsoft Entra ID (OIDC) for SSO.
 - **Postgres is reachable from any Azure service** through its firewall rule. Next: VNet integration with private access.
 - **No API gateway or autoscale on B1**, to keep costs low. Next: move to S1/P0v3 and add API Management when there is traffic.
 - **The assistants are rules, not an AI model**, and the metrics are mocked. Section 7 explains how to swap in real ones.

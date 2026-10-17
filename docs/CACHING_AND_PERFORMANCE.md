@@ -91,7 +91,7 @@ If anyone reintroduces a per-tile query, this test fails.
 ## 5. Measuring it yourself
 
 ```bash
-# Docker stack running (docker compose up -d)
+# Docker stack running (cd pulseboard-platform && docker compose up -d)
 docker compose exec redis redis-cli --scan | cut -d: -f1 | sort | uniq -c   # keys by type
 docker compose exec redis redis-cli monitor                               # watch GET/MGET/SET live
 ```
