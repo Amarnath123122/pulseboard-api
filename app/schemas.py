@@ -166,13 +166,3 @@ class AssistantMessageIn(BaseModel):
     conversation_id: str | None = None
     action: Literal["start", "reply", "skip"] = "reply"
     text: str = Field(default="", max_length=2000)
-
-
-class TokenIn(BaseModel):
-    user_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
-
-
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user_id: str

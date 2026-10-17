@@ -4,7 +4,7 @@ import httpx
 from moto import mock_aws
 
 from app.assistants.setup import drain
-from tests.conftest import SERVICE, sign_in
+from tests.conftest import SERVICE, sign_in, sign_in_admin, token_for
 
 
 def parse_sse(text: str) -> list[tuple[str, dict]]:
@@ -152,7 +152,7 @@ def test_unknown_metric_raises():
 
 
 async def test_metric_crud_search_pagination_and_cache(client):
-    h = await sign_in(client, "admin1")
+    h = await sign_in_admin(client)
     body = {"key": "sales.win_rate", "area": "sales", "title": "Win rate", "unit": "%", "base": 24,
             "volatility": 0.05, "higher_is_better": True, "owners": ["Sales Ops"], "sources": ["crm.deals"]}
     assert (await client.post("/api/v1/metrics", json=body, headers=h)).status_code == 201
@@ -178,10 +178,11 @@ async def test_metric_crud_search_pagination_and_cache(client):
 
 
 async def test_disabled_metric_leaves_boards(client):
+    admin = await sign_in_admin(client)
     h = await sign_in(client, "U8")
     put = {"area": "finance", "title": "Cloud spend", "unit": "USD", "base": 210000, "volatility": 0.05,
            "higher_is_better": False, "owners": ["FinOps"], "sources": ["cloud.billing_export"], "enabled": False}
-    assert (await client.put("/api/v1/metrics/finance.cloud_spend", json=put, headers=h)).status_code == 200
+    assert (await client.put("/api/v1/metrics/finance.cloud_spend", json=put, headers=admin)).status_code == 200
     board_id = await run_setup(client, h, None)
     tiles = (await client.get(f"/api/v1/boards/{board_id}/tiles", headers=h)).json()
     assert all("cloud_spend" not in t["slot_key"] for t in tiles)
@@ -255,3 +256,22 @@ async def test_scheduler_batches_queue_sends():
             received += review_queue().receive(10, 0)
         assert sent == 23 and len(received) == 23
         review_queue.cache_clear()
+
+
+async def test_rbac_permissions_from_identity_token(client):
+    viewer = await sign_in(client, "v1")
+    editor = await sign_in(client, "e1", "EDITOR")
+    body = {"key": "sales.win_rate", "area": "sales", "title": "Win rate", "unit": "%", "base": 24,
+            "volatility": 0.05}
+    assert (await client.get("/api/v1/metrics", headers=viewer)).status_code == 200
+    denied = await client.post("/api/v1/metrics", json=body, headers=viewer)
+    assert denied.status_code == 403 and denied.json()["error"]["details"]["missing"] == ["metrics:write"]
+    assert (await client.post("/api/v1/metrics", json=body, headers=editor)).status_code == 201
+
+
+async def test_rejects_bad_tokens(client):
+    for token in (token_for("x", aud="someone-else"), token_for("x", iss="evil"), token_for("x", typ="refresh"),
+                  token_for("x")[:-4] + "AAAA"):
+        r = await client.get("/api/v1/boards", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, token
+    assert (await client.get("/api/v1/boards")).status_code == 401

@@ -119,3 +119,8 @@ Every setting comes from a `PB_*` environment variable; see `app/core/config.py`
 | [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | Full architecture: C4 diagrams, sequences, state machines, security, failure modes |
 | [docs/CACHING_AND_PERFORMANCE.md](docs/CACHING_AND_PERFORMANCE.md) | Redis keys, TTLs, invalidation, the N+1 fixes and the test that guards them |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Local, Docker and Azure runs; CI/CD setup; configuration; troubleshooting |
+
+## Version 3: microservices
+- **Authentication has moved** to the `pulseboard-identity` service. This API holds no passwords or keys. It verifies RS256 tokens against identity's JWKS (`PB_JWKS_URL`) and authorizes each route with the token's `perms` (`require("metrics:write")` and so on).
+- **Moved to `pulseboard-platform`:** Docker Compose, the API gateway, the Azure Bicep and the deploy scripts. See `pulseboard-platform/docs/MICROSERVICES.md`.
+- **Tests and CI** mint identity-style tokens with a throwaway key (`scripts/mint_token.py`), so this repo tests on its own.

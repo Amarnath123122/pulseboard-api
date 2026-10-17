@@ -7,12 +7,13 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.security import Principal, current_principal
+from app.core.security import require
 from app.db.session import get_session
 from app.schemas import UtcDateTime
 from app.services import catalog
 
-router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"], dependencies=[Depends(current_principal)])
+router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"], dependencies=[Depends(require("metrics:read"))])
+WRITE = [Depends(require("metrics:write"))]
 
 
 
@@ -76,19 +77,19 @@ async def get_metric(key: str, session: AsyncSession = Depends(get_session)):  #
     return await catalog.get(session, key)
 
 
-@router.post("", response_model=MetricOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=MetricOut, status_code=status.HTTP_201_CREATED, dependencies=WRITE)
 async def create_metric(body: MetricIn, session: AsyncSession = Depends(get_session)):  # noqa: ANN201
     return await catalog.create(session, body.model_dump())
 
 
-@router.put("/{key}", response_model=MetricOut)
+@router.put("/{key}", response_model=MetricOut, dependencies=WRITE)
 async def update_metric(key: str, body: MetricBase, session: AsyncSession = Depends(get_session)):  # noqa: ANN201
     return await catalog.update(session, key, body.model_dump())
 
 
-@router.delete("/{key}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{key}", status_code=status.HTTP_204_NO_CONTENT, dependencies=WRITE)
 async def delete_metric(
-    key: str, _: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    key: str, session: AsyncSession = Depends(get_session)
 ) -> Response:
     await catalog.delete(session, key)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

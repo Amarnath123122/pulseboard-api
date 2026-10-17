@@ -1,20 +1,24 @@
 """End-to-end walkthrough against a running Pulseboard API.
 
-    python scripts/demo.py                                   # http://localhost:8000
-    python scripts/demo.py https://<app>.azurewebsites.net <service-key>
+    python scripts/demo.py                                        # via the gateway on http://localhost:8080
+    python scripts/demo.py <gateway-url> <service-key> <api-url>   # api-url: direct API, for /internal calls
 
 Signs in, chats with the setup assistant, waits for the board to go live, reads every tile, marks an alert as
 seen, queues a review and shows the board version moving forward.
 """
 
+import base64
 import json
+import os
 import sys
 import time
 
 import httpx
 
-BASE = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8000"
+BASE = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8080"
 SERVICE_KEY = sys.argv[2] if len(sys.argv) > 2 else "local-internal-service-key"
+AUTH = BASE  # the gateway routes /api/v1/auth/* to the identity service
+INTERNAL = sys.argv[3].rstrip("/") if len(sys.argv) > 3 else "http://localhost:8000"  # never exposed by the gateway
 USER = f"demo-{int(time.time()) % 100000}"
 
 
@@ -63,13 +67,20 @@ def fmt(result: dict | None) -> str:
 def main() -> None:
     with httpx.Client(base_url=BASE, timeout=60) as c:
         step(f"Health  ({BASE})")
-        print("  /healthz ->", c.get("/healthz").json())
-        print("  /readyz  ->", c.get("/readyz").json())
+        print("  api /healthz ->", httpx.get(f"{INTERNAL}/healthz", timeout=30).json())
+        print("  api /readyz  ->", httpx.get(f"{INTERNAL}/readyz", timeout=30).json())
 
         step(f"Sign in as {USER}")
-        token = c.post("/api/v1/auth/dev-token", json={"user_id": USER}).json()["access_token"]
+        if os.getenv("DEMO_TOKEN"):  # CI: a pre-minted identity-style token (see scripts/mint_token.py)
+            token = os.environ["DEMO_TOKEN"]
+            claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+            user_id, role = claims["sub"], claims["role"]
+        else:
+            creds = {"email": f"{USER}@example.com", "password": "Demo-Password-2026", "display_name": USER}
+            session = httpx.post(f"{AUTH}/api/v1/auth/register", json=creds, timeout=30).json()
+            token, user_id, role = session["access_token"], session["user"]["id"], session["user"]["role"]
         c.headers["Authorization"] = f"Bearer {token}"
-        print(f"  got JWT ({token[:24]}...)")
+        print(f"  signed in via identity service; role={role} token={token[:24]}...")
         r = c.get("/api/v1/boards/overview")
         print(f"  overview before setup -> HTTP {r.status_code} ({r.json()['error']['code']})")
 
@@ -118,7 +129,7 @@ def main() -> None:
 
         step("Scheduled review through the queue")
         svc = {"X-Service-Key": SERVICE_KEY}
-        print("  enqueue ->", c.post(f"/internal/v1/reviews/{board_id}", headers=svc).json())
+        print("  enqueue ->", httpx.post(f"{INTERNAL}/internal/v1/reviews/{board_id}", headers=svc, timeout=30).json())
         for _ in range(60):
             board = c.get(f"/api/v1/boards/{board_id}").json()
             if board["version"] >= 2 and board["build_status_cd"] == "LIVE":
@@ -128,7 +139,7 @@ def main() -> None:
         if alert:
             same = [t for t in c.get(f"/api/v1/boards/{board_id}/tiles").json() if t["slot_key"] == alert["slot_key"]]
             print(f"  alert follow-up after review -> {same[0]['follow_up_cd'] if same else 'alert cleared'}")
-        for j in c.get("/internal/v1/jobs", params={"user_id": USER}, headers=svc).json():
+        for j in httpx.get(f"{INTERNAL}/internal/v1/jobs", params={"user_id": user_id}, headers=svc, timeout=30).json():
             print(f"  job {j['job_type_cd']:<6} {j['status_cd']}")
 
         step("Done")

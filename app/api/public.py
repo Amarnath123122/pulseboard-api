@@ -11,30 +11,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.assistants import setup
-from app.core.config import get_settings
-from app.core.errors import AppError, Forbidden, NotFound
-from app.core.security import Principal, current_principal, issue_token
+from app.core.errors import AppError, NotFound
+from app.core.security import Principal, require
 from app.db.models import Board, Conversation, Tile
 from app.db.session import get_session
-from app.schemas import AssistantMessageIn, BoardOut, FollowUpIn, TileDataOut, TileOut, TokenIn, TokenOut
+from app.schemas import AssistantMessageIn, BoardOut, FollowUpIn, TileDataOut, TileOut
 from app.services import cache, keys, layout, metrics
 from app.services import catalog as catalog_service
 
 router = APIRouter(prefix="/api/v1")
 
 
-@router.post("/auth/dev-token", response_model=TokenOut, tags=["auth"])
-async def dev_token(body: TokenIn) -> TokenOut:
-    """Demo sign-in. Disable with PB_ENABLE_DEV_TOKEN=false once an identity provider is wired in."""
-    if not get_settings().enable_dev_token:
-        raise Forbidden("Demo sign-in is disabled")
-    return TokenOut(access_token=issue_token(body.user_id), user_id=body.user_id)
-
-
 @router.post("/assistant/messages", tags=["assistant"])
 async def assistant_message(
     body: AssistantMessageIn,
-    me: Principal = Depends(current_principal),
+    me: Principal = Depends(require("setup:run")),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
     """One setup-assistant turn, streamed as text/event-stream."""
@@ -59,20 +50,20 @@ async def assistant_message(
 
 
 @router.get("/boards/overview", response_model=BoardOut, tags=["boards"])
-async def my_overview(me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)):  # noqa: ANN201
+async def my_overview(me: Principal = Depends(require("boards:read")), session: AsyncSession = Depends(get_session)):  # noqa: ANN201
     return _owned(await layout.find_overview(session, me.user_id), me)
 
 
 @router.get("/boards/{board_id}", response_model=BoardOut, tags=["boards"])
 async def get_board(
-    board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    board_id: str, me: Principal = Depends(require("boards:read")), session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
     return await _board_dict(session, board_id, me)
 
 
 @router.get("/boards/{board_id}/tiles", response_model=list[TileOut], tags=["boards"])
 async def board_tiles(
-    board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    board_id: str, me: Principal = Depends(require("boards:read")), session: AsyncSession = Depends(get_session)
 ) -> list[dict[str, Any]]:
     """Tiles in position order. Cache-aside under `tiles:<board>`; publish and follow-up changes invalidate it."""
     await _board_dict(session, board_id, me)  # ownership check (itself cached)
@@ -87,7 +78,7 @@ async def board_tiles(
 
 @router.get("/boards/{board_id}/tile-data", response_model=list[TileDataOut], tags=["boards"])
 async def board_tile_data(
-    board_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    board_id: str, me: Principal = Depends(require("boards:read")), session: AsyncSession = Depends(get_session)
 ) -> list[TileDataOut]:
     """Data for every tile on a board in one request instead of one HTTP call per tile:
     one SQL query for the tiles, one Redis MGET for cached results, one pipelined SET for the misses."""
@@ -98,7 +89,7 @@ async def board_tile_data(
 
 @router.get("/tiles/{tile_id}/data", response_model=TileDataOut, tags=["tiles"])
 async def tile_data(
-    tile_id: str, me: Principal = Depends(current_principal), session: AsyncSession = Depends(get_session)
+    tile_id: str, me: Principal = Depends(require("boards:read")), session: AsyncSession = Depends(get_session)
 ) -> TileDataOut:
     """Runs one tile's saved query. A source failure is reported in the body (status ERROR) so one broken
     source never blanks the whole board."""
@@ -107,7 +98,7 @@ async def tile_data(
 
 @router.patch("/tiles/{tile_id}/follow-up", response_model=TileOut, tags=["tiles"])
 async def set_follow_up(
-    tile_id: str, body: FollowUpIn, me: Principal = Depends(current_principal),
+    tile_id: str, body: FollowUpIn, me: Principal = Depends(require("boards:follow_up")),
     session: AsyncSession = Depends(get_session),
 ) -> Tile:
     tile = await _owned_tile(session, tile_id, me)

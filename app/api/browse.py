@@ -10,7 +10,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.security import Principal, current_principal
+from app.core.security import Principal, current_principal, require
 from app.db.models import AssistantJob, Board, Tile
 from app.db.session import get_session
 from app.schemas import BoardOut, JobOut
@@ -74,7 +74,7 @@ async def my_boards(
     kind: Literal["OVERVIEW", "DETAIL", "BRIEFING"] | None = None,
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=100),
-    me: Principal = Depends(current_principal),
+    me: Principal = Depends(require("boards:read")),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Every board the user owns, newest first, with tile and alert counts. Cached per user until it changes."""
@@ -114,7 +114,7 @@ async def my_jobs(
     status: Literal["RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"] | None = None,
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=100),
-    me: Principal = Depends(current_principal),
+    me: Principal = Depends(require("jobs:read")),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """The user's assistant activity (setups and reviews), newest first. Not cached: it changes constantly."""

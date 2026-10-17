@@ -4,7 +4,6 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_DEFAULT_JWT_SECRET = "local-dev-secret-change-me-32-bytes!!"
 _DEFAULT_SERVICE_KEY = "local-internal-service-key"
 
 
@@ -23,10 +22,12 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    jwt_secret: str = _DEFAULT_JWT_SECRET
-    jwt_algorithm: str = "HS256"
-    jwt_ttl_minutes: int = 480
-    enable_dev_token: bool = True  # demo sign-in; replace with your identity provider for real users
+    # Tokens are issued by pulseboard-identity (RS256). The API only verifies them, using the identity
+    # service's JWKS (jwks_url) or, for tests and air-gapped setups, a pinned public key.
+    jwks_url: str | None = "http://localhost:8100/.well-known/jwks.json"
+    jwt_public_key_b64: str | None = None
+    jwt_issuer: str = "pulseboard-identity"
+    jwt_audience: str = "pulseboard"
     service_key: str = _DEFAULT_SERVICE_KEY  # X-Service-Key for /internal/v1
 
     # Review queue. "sqs" talks to AWS SQS (a local moto server by default); "azure" uses Azure Storage Queues.
@@ -69,8 +70,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _no_default_secrets_in_production(self) -> "Settings":
-        if self.is_production and (self.jwt_secret == _DEFAULT_JWT_SECRET or self.service_key == _DEFAULT_SERVICE_KEY):
-            raise ValueError("PB_JWT_SECRET and PB_SERVICE_KEY must be set in production")
+        if self.is_production and (self.service_key == _DEFAULT_SERVICE_KEY or not (self.jwks_url or self.jwt_public_key_b64)):
+            raise ValueError("PB_SERVICE_KEY and PB_JWKS_URL (or PB_JWT_PUBLIC_KEY_B64) must be set in production")
         return self
 
 

@@ -17,6 +17,7 @@ jobs:
 
   integration:
     # The real image against real Postgres, Redis and mock SQS, driven end to end by scripts/demo.py.
+    # Tokens are minted like pulseboard-identity does; the full-system test lives in pulseboard-platform.
     needs: test
     runs-on: ubuntu-latest
     services:
@@ -34,10 +35,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t pulseboard-api:ci .
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install httpx "pyjwt[crypto]"
+      - name: Mint an identity-style token
+        run: |
+          read -r PUB TOKEN < <(python scripts/mint_token.py EDITOR)
+          echo "::add-mask::$TOKEN"
+          echo "PUB=$PUB" >> "$GITHUB_ENV"
+          echo "DEMO_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - name: Start API
         run: |
           docker run -d --name api --network host \
             -e PB_ENVIRONMENT=ci \
+            -e PB_JWT_PUBLIC_KEY_B64="$PUB" \
             -e PB_DATABASE_URL=postgresql+asyncpg://pulseboard:ci-password@127.0.0.1:5432/pulseboard \
             -e PB_DB_AUTO_CREATE=false \
             -e PB_CACHE_BACKEND=redis -e PB_REDIS_URL=redis://127.0.0.1:6379/0 \
@@ -46,9 +57,7 @@ jobs:
             pulseboard-api:ci
           for i in $(seq 1 30); do curl -fs http://127.0.0.1:8000/readyz && exit 0; sleep 2; done
           docker logs api; exit 1
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install httpx && python scripts/demo.py http://127.0.0.1:8000
+      - run: python scripts/demo.py http://127.0.0.1:8000 local-internal-service-key http://127.0.0.1:8000
       - run: curl -fs http://127.0.0.1:8000/readyz | grep '"cache":"up"'
       - if: failure()
         run: docker logs api
